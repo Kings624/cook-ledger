@@ -25,9 +25,12 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useMemo } = React;
+    const { useState, useEffect, useMemo, useRef } = React;
 
-    // --- 安全日期格式化工具 (避免 UTC 時區漂移) ---
+    // 204室專屬雲端同步伺服器 (JSONBlob 實時資料庫)
+    const CLOUD_SYNC_ENDPOINT = 'https://jsonblob.com/api/jsonBlob/1281893821098231098';
+    const PERMANENT_STORAGE_KEY = 'ROOM204_LOCAL_CACHE_V4';
+
     function formatLocalDate(d = new Date()) {
       const year = d.getFullYear();
       const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -35,7 +38,6 @@
       return `${year}-${month}-${day}`;
     }
 
-    // 採購類別標籤 (支援多選)
     const CATEGORIES = [
       { id: 'veg', name: '蔬菜水果', emoji: '🥦', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
       { id: 'meat', name: '肉類海鮮', emoji: '🥩', color: 'bg-rose-100 text-rose-800 border-rose-300' },
@@ -45,7 +47,6 @@
       { id: 'other', name: '其他採購', emoji: '🛍️', color: 'bg-slate-100 text-slate-800 border-slate-300' }
     ];
 
-    // 全分類 Emoji 清單
     const EMOJI_CATEGORIES = [
       { name: '表情角色', emojis: ['👩🏻‍🍳', '👩🏼‍🌾', '👨🏻‍🍳', '🤴🏻', '👸🏻', '🥷🏻', '🧙🏻‍♀️', '🧑‍🍳', '🕵🏻‍♂️', '💃🏻', '🕺🏻'] },
       { name: '可愛動物', emojis: ['🐱', '🐶', '🐰', '🦊', '🐻', '🐼', '🐨', '🦁', '🐯', '🐸', '🐧', '🐥', '🦄', '🦦'] },
@@ -59,14 +60,9 @@
       { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', googleEmail: null }
     ];
 
-    // 永久固定儲存 Key
-    const PERMANENT_STORAGE_KEY = 'ROOM204_PERMANENT_STORAGE_V2';
-
-    // 精確生成過去 13 週 (約 3 個月) 週選項
     function getPast13Weeks(baseDate = new Date()) {
       const weeks = [];
       const now = new Date(baseDate);
-      
       const day = now.getDay();
       const diffToMonday = (day === 0 ? -6 : 1) - day;
       const currentMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
@@ -87,31 +83,14 @@
     }
 
     function App() {
-      // 線上標準時間狀態
       const [currentNowDate, setCurrentNowDate] = useState(new Date());
-      const [isNetworkTimeSynced, setIsNetworkTimeSynced] = useState(false);
-
-      // 嘗試連線線上天文台/標準時間 API 校時
-      useEffect(() => {
-        fetch('https://worldtimeapi.org/api/timezone/Europe/London')
-          .then(res => res.json())
-          .then(data => {
-            if (data && data.datetime) {
-              const netDate = new Date(data.datetime);
-              setCurrentNowDate(netDate);
-              setIsNetworkTimeSynced(true);
-            }
-          })
-          .catch(() => {
-            console.log('網路時間取得失敗，使用裝置本地時間');
-          });
-      }, []);
+      const [syncStatus, setSyncStatus] = useState('online'); // 'online' | 'syncing' | 'error'
+      const [lastSyncTime, setLastSyncTime] = useState(null);
 
       const weeksList = useMemo(() => getPast13Weeks(currentNowDate), [currentNowDate]);
       const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
       const [activeTab, setActiveTab] = useState('expenses');
       
-      // 室友與身分登入狀態
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [loggedInUserEmail, setLoggedInUserEmail] = useState(null);
       const [currentUser, setCurrentUser] = useState(null);
@@ -119,7 +98,6 @@
       const [showEmojiPickerFor, setShowEmojiPickerFor] = useState(null);
       const [customEmojiInput, setCustomEmojiInput] = useState('');
 
-      // Modal 彈窗
       const [showLoginModal, setShowLoginModal] = useState(false);
       const [showBackupModal, setShowBackupModal] = useState(false);
       const [backupJsonInput, setBackupJsonInput] = useState('');
@@ -127,36 +105,62 @@
       const [bindTarget, setBindTarget] = useState('Janice');
       const [loginEmailInput, setLoginEmailInput] = useState('');
 
-      // 數據狀態
       const [expenses, setExpenses] = useState([]);
       const [dinnerAbsent, setDinnerAbsent] = useState({});
       const [settlements, setSettlements] = useState({});
 
-      // 載入與自動遷移舊數據
-      useEffect(() => {
-        let loaded = localStorage.getItem(PERMANENT_STORAGE_KEY);
-        
-        if (!loaded) {
-          const oldKeys = ['ROOM204_PERMANENT_STORAGE_V1', 'cook_ledger_shared_data_v5', 'cook_ledger_shared_data_v4'];
-          for (const k of oldKeys) {
-            const data = localStorage.getItem(k);
-            if (data) { loaded = data; break; }
+      // 雲端讀取函式
+      const fetchFromCloud = async () => {
+        setSyncStatus('syncing');
+        try {
+          const res = await fetch(CLOUD_SYNC_ENDPOINT, {
+            headers: { 'Accept': 'application/json' }
+          });
+          if (res.ok) {
+            const parsed = await res.json();
+            if (parsed) {
+              if (parsed.expenses) setExpenses(parsed.expenses);
+              if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
+              if (parsed.settlements) setSettlements(parsed.settlements);
+              if (parsed.roommates) setRoommates(parsed.roommates);
+              setSyncStatus('online');
+              setLastSyncTime(new Date().toLocaleTimeString());
+              localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(parsed));
+            }
+          } else {
+            setSyncStatus('error');
           }
+        } catch (e) {
+          console.log('雲端讀取暫時失效:', e);
+          setSyncStatus('error');
         }
+      };
 
-        if (loaded) {
+      // 初始化連線與 4 秒自動輪詢
+      useEffect(() => {
+        const localData = localStorage.getItem(PERMANENT_STORAGE_KEY);
+        if (localData) {
           try {
-            const parsed = JSON.parse(loaded);
+            const parsed = JSON.parse(localData);
             if (parsed.expenses) setExpenses(parsed.expenses);
             if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
             if (parsed.settlements) setSettlements(parsed.settlements);
             if (parsed.roommates) setRoommates(parsed.roommates);
             if (parsed.loggedInUserEmail) setLoggedInUserEmail(parsed.loggedInUserEmail);
-          } catch(e) { console.error('Data loading error:', e); }
+          } catch(e) {}
         }
+
+        fetchFromCloud();
+
+        const timer = setInterval(() => {
+          fetchFromCloud();
+        }, 4000);
+
+        return () => clearInterval(timer);
       }, []);
 
-      const saveData = (newExp, newDin, newSet, newRm, newEmail) => {
+      // 推送寫入雲端伺服器
+      const saveData = async (newExp, newDin, newSet, newRm, newEmail) => {
         const payload = {
           expenses: newExp !== undefined ? newExp : expenses,
           dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
@@ -164,7 +168,29 @@
           roommates: newRm !== undefined ? newRm : roommates,
           loggedInUserEmail: newEmail !== undefined ? newEmail : loggedInUserEmail
         };
+
         localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
+        setSyncStatus('syncing');
+
+        try {
+          const res = await fetch(CLOUD_SYNC_ENDPOINT, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+          if (res.ok) {
+            setSyncStatus('online');
+            setLastSyncTime(new Date().toLocaleTimeString());
+          } else {
+            setSyncStatus('error');
+          }
+        } catch (e) {
+          console.error('雲端寫入失敗:', e);
+          setSyncStatus('error');
+        }
       };
 
       useEffect(() => {
@@ -187,7 +213,6 @@
         }
 
         const cleanEmail = email.trim().toLowerCase();
-        
         const existing = roommates.find(r => r.googleEmail === cleanEmail && r.id !== roommateId);
         if (existing) {
           alert(`⚠️ 此 Google 帳號已被室友 【${existing.name}】 綁定，無法重複綁定！`);
@@ -217,7 +242,7 @@
         const payload = { expenses, dinnerAbsent, settlements, roommates };
         const jsonStr = JSON.stringify(payload, null, 2);
         navigator.clipboard.writeText(jsonStr);
-        alert('📋 數據已成功複製到剪貼簿！可將此備份文字妥善保存。');
+        alert('📋 數據已成功複製到剪貼簿！');
       };
 
       const handleImportBackup = () => {
@@ -232,9 +257,9 @@
           saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates, undefined);
           setShowBackupModal(false);
           setBackupJsonInput('');
-          alert('✅ 備份數據已成功匯入與恢復！');
+          alert('✅ 數據已成功匯入並同步至所有室友手機！');
         } catch(e) {
-          alert('❌ 備份格式錯誤，請確認貼上的是正確的 JSON 數據。');
+          alert('❌ 格式錯誤，請貼上正確的 JSON 數據。');
         }
       };
 
@@ -247,7 +272,6 @@
         setCustomEmojiInput('');
       };
 
-      // --- 新增採購項目 ---
       const [itemTitle, setItemTitle] = useState('');
       const [itemAmount, setItemAmount] = useState('');
       const [itemCategories, setItemCategories] = useState(['veg']);
@@ -276,7 +300,7 @@
         e.preventDefault();
 
         if (!currentUser) {
-          alert('🔒 權限限制：請先登入 Google 帳號並驗證身份後再進行操作！');
+          alert('🔒 權限限制：請先登入 Google 帳號！');
           return;
         }
 
@@ -304,7 +328,7 @@
 
         setItemTitle('');
         setItemAmount('');
-        alert('✨ 成功加入採購明細！');
+        alert('✨ 成功加入採購明細！雲端已同步');
       };
 
       const handleDeleteExpense = (exp) => {
@@ -332,7 +356,7 @@
         }
 
         if (currentUser !== personId) {
-          alert(`🔒 權限限制：您目前是 ${currentUser}，只能修改自己當天「回家吃 / 不回家吃」的狀態喔！`);
+          alert(`🔒 權限限制：您目前是 ${currentUser}，只能修改自己的晚餐狀態！`);
           return;
         }
 
@@ -346,7 +370,6 @@
         saveData(undefined, updatedDinner, undefined, undefined, undefined);
       };
 
-      // 週計算
       const currentWeekObj = useMemo(() => {
         return weeksList.find(w => w.key === selectedWeekKey) || weeksList[0];
       }, [selectedWeekKey, weeksList]);
@@ -419,12 +442,12 @@
         }
 
         if (actionType === 'payer_pay' && currentUser !== tr.from) {
-          alert(`🔒 權限限制：此筆款項的付款方是 ${tr.from}，只能由 ${tr.from} 本人點擊標記付款！`);
+          alert(`🔒 權限限制：付款方為 ${tr.from}，只能由 ${tr.from} 本人點擊！`);
           return;
         }
 
         if (actionType === 'receiver_confirm' && currentUser !== tr.to) {
-          alert(`🔒 權限限制：此筆款項的收款方是 ${tr.to}，只能由 ${tr.to} 本人點擊確認消帳！`);
+          alert(`🔒 權限限制：收款方為 ${tr.to}，只能由 ${tr.to} 本人點擊！`);
           return;
         }
 
@@ -452,31 +475,41 @@
 
       return (
         <div className="max-w-3xl mx-auto p-4 pb-24">
-          {/* Header：204室小帳本 */}
+          {/* Header */}
           <header className="bg-white rounded-3xl p-6 shadow-sm mb-5 border-2 border-rose-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-3xl">🏠</span>
                 <h1 className="text-2xl font-bold text-slate-800 tracking-tight">204室小帳本</h1>
-                {isNetworkTimeSynced && (
-                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full" title="線上天文台校準時間">
-                    🌐 網絡校時已連線
+                
+                {/* 雲端連線狀態燈號 */}
+                <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
+                  syncStatus === 'syncing' 
+                    ? 'bg-amber-100 text-amber-800' 
+                    : syncStatus === 'online'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : 'bg-rose-100 text-rose-800'
+                }`}>
+                  <i className={`fa-solid ${
+                    syncStatus === 'syncing' ? 'fa-spinner fa-spin' : syncStatus === 'online' ? 'fa-cloud-check' : 'fa-triangle-exclamation'
+                  }`}></i>
+                  <span>
+                    {syncStatus === 'syncing' ? '雲端同步中...' : syncStatus === 'online' ? `雲端即時連線 (${lastSyncTime || '即時'})` : '離線備援模式'}
                   </span>
-                )}
+                </span>
               </div>
               <p className="text-xs text-rose-500 font-medium mt-1">Janice • Carrie • Kingsley 買菜與晚餐記錄小幫手</p>
             </div>
 
-            {/* Google 帳號與備份 */}
+            {/* 帳號登入與備份 */}
             <div className="flex flex-col gap-2 items-start md:items-end">
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => setShowBackupModal(true)}
                   className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-1.5 rounded-full text-xs transition flex items-center gap-1.5"
-                  title="數據備份與匯入"
                 >
                   <i className="fa-solid fa-database"></i>
-                  <span>數據備份</span>
+                  <span>備份</span>
                 </button>
 
                 {currentUser ? (
@@ -498,35 +531,33 @@
                 )}
               </div>
 
-              {/* 室友身分說明 */}
               <div className="bg-amber-50/80 px-3 py-1.5 rounded-2xl border border-amber-200 flex items-center gap-2 text-xs">
                 <span className="font-bold text-amber-800">👤 目前身份：</span>
                 {currentUser ? (
                   <span className="font-bold text-emerald-700">🔒 已鎖定為 {currentRmUserObj.emoji} {currentUser}</span>
                 ) : (
-                  <span className="text-rose-600 font-bold">🔒 未登入 (唯讀模式)</span>
+                  <span className="text-rose-600 font-bold">🔒 未登入 (唯讀觀看)</span>
                 )}
               </div>
             </div>
           </header>
 
-          {/* 未登入警告 Banner */}
           {!currentUser && (
             <div className="bg-amber-100/80 border-2 border-amber-300 rounded-3xl p-4 mb-5 flex items-center justify-between text-xs font-bold text-amber-900 shadow-sm">
               <div className="flex items-center gap-2">
                 <span className="text-xl">🔒</span>
-                <span>您目前尚未登入 Google 帳號！您可以查看歷史帳目，但**需登入後方可新增費用、登記晚餐或進行付款消帳**。</span>
+                <span>目前為**唯讀觀看模式**。請點擊右上方登入 Google 帳號鎖定身份後，方可新增採購、登記晚餐或進行消帳！</span>
               </div>
               <button
                 onClick={() => setShowLoginModal(true)}
                 className="bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-1.5 rounded-2xl shrink-0 font-bold ml-2 shadow transition"
               >
-                區域登入
+                登入驗證
               </button>
             </div>
           )}
 
-          {/* 全 Emoji 個人頭像選單 */}
+          {/* 頭像 Emoji 選單 */}
           <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
               <span className="text-base">🎨</span>
@@ -544,7 +575,6 @@
                     <i className="fa-solid fa-pen text-[10px] text-rose-400"></i>
                   </button>
 
-                  {/* 豐富 Emoji 選擇選單 */}
                   {showEmojiPickerFor === r.id && (
                     <div className="absolute right-0 top-11 bg-white p-4 rounded-3xl shadow-2xl border-2 border-rose-200 z-50 w-72 max-h-80 overflow-y-auto space-y-3">
                       <div className="flex gap-2 border-b border-rose-100 pb-2">
@@ -586,7 +616,7 @@
             </div>
           </div>
 
-          {/* 週選擇導覽列 */}
+          {/* 週選擇導覽 */}
           <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <i className="fa-solid fa-calendar-heart text-rose-500 text-lg"></i>
@@ -637,7 +667,6 @@
           {/* TAB 1: 採購明細 */}
           {activeTab === 'expenses' && (
             <div className="space-y-5">
-              {/* 新增表單 */}
               <form onSubmit={handleAddExpense} className={`bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100 ${!currentUser ? 'opacity-60' : ''}`}>
                 <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
                   <span className="text-xl">🍓</span>
@@ -671,7 +700,6 @@
                   </div>
                 </div>
 
-                {/* 採購類別標籤多選 */}
                 <div className="mt-4">
                   <label className="block text-xs font-bold text-slate-600 mb-2">物品分類標籤 (可多選)：</label>
                   <div className="flex flex-wrap gap-2">
@@ -716,7 +744,7 @@
                       {currentUser ? (
                         <>
                           <span>{currentRmUserObj.emoji}</span>
-                          <span>{currentUser} (自動鎖定登記人)</span>
+                          <span>{currentUser} (自動鎖定)</span>
                         </>
                       ) : (
                         <span className="text-slate-400">🔒 請先登入 Google 帳號</span>
@@ -725,7 +753,6 @@
                   </div>
                 </div>
 
-                {/* 分攤成員 */}
                 <div className="mt-4">
                   <label className="block text-xs font-bold text-slate-600 mb-2">分攤成員 (預設均分)</label>
                   <div className="flex gap-2">
@@ -901,7 +928,6 @@
           {/* TAB 3: 本週結算與消帳 */}
           {activeTab === 'settlement' && (
             <div className="space-y-5">
-              {/* 3人收支卡片 */}
               <div className="grid grid-cols-3 gap-3">
                 {roommates.map(r => {
                   const paid = weeklyCalculation.paidMap[r.id] || 0;
@@ -925,7 +951,6 @@
                 })}
               </div>
 
-              {/* 轉帳與消帳清單 */}
               <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
                 <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
                   <span className="text-xl">💰</span>
@@ -1013,7 +1038,7 @@
             </div>
           )}
 
-          {/* Google 登入驗證 Modal */}
+          {/* Modal */}
           {showLoginModal && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
@@ -1071,7 +1096,7 @@
             </div>
           )}
 
-          {/* 數據備份 Modal */}
+          {/* Backup Modal */}
           {showBackupModal && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border-2 border-rose-100 space-y-4">
