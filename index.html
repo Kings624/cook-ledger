@@ -27,7 +27,15 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo } = React;
 
-    // 採購類別標籤
+    // --- 安全日期格式化工具 (避免 UTC 時區漂移) ---
+    function formatLocalDate(d = new Date()) {
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    }
+
+    // 採購類別標籤 (支援多選)
     const CATEGORIES = [
       { id: 'veg', name: '蔬菜水果', emoji: '🥦', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
       { id: 'meat', name: '肉類海鮮', emoji: '🥩', color: 'bg-rose-100 text-rose-800 border-rose-300' },
@@ -51,28 +59,27 @@
       { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', googleEmail: null }
     ];
 
-    // 生成過去 13 週 (約 3 個月) 週選項
-    function getPast13Weeks() {
+    // 永久固定儲存 Key
+    const PERMANENT_STORAGE_KEY = 'ROOM204_PERMANENT_STORAGE_V2';
+
+    // 精確生成過去 13 週 (約 3 個月) 週選項
+    function getPast13Weeks(baseDate = new Date()) {
       const weeks = [];
-      const now = new Date();
+      const now = new Date(baseDate);
       
       const day = now.getDay();
       const diffToMonday = (day === 0 ? -6 : 1) - day;
-      const currentMonday = new Date(now);
-      currentMonday.setDate(now.getDate() + diffToMonday);
-      currentMonday.setHours(0,0,0,0);
+      const currentMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
 
       for (let i = 0; i < 13; i++) {
-        const mon = new Date(currentMonday);
-        mon.setDate(currentMonday.getDate() - (i * 7));
-        const sun = new Date(mon);
-        sun.setDate(mon.getDate() + 6);
+        const mon = new Date(currentMonday.getFullYear(), currentMonday.getMonth(), currentMonday.getDate() - (i * 7));
+        const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
 
-        const formatDate = (d) => `${d.getMonth()+1}/${d.getDate()}`;
-        const key = mon.toISOString().split('T')[0];
+        const formatDateDisplay = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
+        const key = formatLocalDate(mon);
         const label = i === 0 
-          ? `本週 (${formatDate(mon)} - ${formatDate(sun)})`
-          : `${i} 週前 (${formatDate(mon)} - ${formatDate(sun)})`;
+          ? `本週 (${formatDateDisplay(mon)} - ${formatDateDisplay(sun)})`
+          : `${i} 週前 (${formatDateDisplay(mon)} - ${formatDateDisplay(sun)})`;
 
         weeks.push({ key, label, startDate: mon, endDate: sun });
       }
@@ -80,101 +87,182 @@
     }
 
     function App() {
-      const weeksList = useMemo(() => getPast13Weeks(), []);
+      // 線上標準時間狀態
+      const [currentNowDate, setCurrentNowDate] = useState(new Date());
+      const [isNetworkTimeSynced, setIsNetworkTimeSynced] = useState(false);
+
+      // 嘗試連線線上天文台/標準時間 API 校時
+      useEffect(() => {
+        fetch('https://worldtimeapi.org/api/timezone/Europe/London')
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.datetime) {
+              const netDate = new Date(data.datetime);
+              setCurrentNowDate(netDate);
+              setIsNetworkTimeSynced(true);
+            }
+          })
+          .catch(() => {
+            console.log('網路時間取得失敗，使用裝置本地時間');
+          });
+      }, []);
+
+      const weeksList = useMemo(() => getPast13Weeks(currentNowDate), [currentNowDate]);
       const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
-      const [activeTab, setActiveTab] = useState('expenses'); // 'expenses', 'dinner', 'settlement'
+      const [activeTab, setActiveTab] = useState('expenses');
       
-      // 室友資料與頭像
+      // 室友與身分登入狀態
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
-      const [currentUser, setCurrentUser] = useState('Kingsley');
+      const [loggedInUserEmail, setLoggedInUserEmail] = useState(null);
+      const [currentUser, setCurrentUser] = useState(null);
+
       const [showEmojiPickerFor, setShowEmojiPickerFor] = useState(null);
       const [customEmojiInput, setCustomEmojiInput] = useState('');
 
-      // Google 綁定彈窗狀態
-      const [showBindModal, setShowBindModal] = useState(false);
-      const [selectedBindTarget, setSelectedBindTarget] = useState('Kingsley');
-      const [inputGoogleEmail, setInputGoogleEmail] = useState('');
+      // Modal 彈窗
+      const [showLoginModal, setShowLoginModal] = useState(false);
+      const [showBackupModal, setShowBackupModal] = useState(false);
+      const [backupJsonInput, setBackupJsonInput] = useState('');
 
-      // 資料狀態
+      const [bindTarget, setBindTarget] = useState('Janice');
+      const [loginEmailInput, setLoginEmailInput] = useState('');
+
+      // 數據狀態
       const [expenses, setExpenses] = useState([]);
       const [dinnerAbsent, setDinnerAbsent] = useState({});
       const [settlements, setSettlements] = useState({});
 
-      // 載入與儲存數據
+      // 載入與自動遷移舊數據
       useEffect(() => {
-        const saved = localStorage.getItem('cook_ledger_shared_data_v5');
-        if (saved) {
+        let loaded = localStorage.getItem(PERMANENT_STORAGE_KEY);
+        
+        if (!loaded) {
+          const oldKeys = ['ROOM204_PERMANENT_STORAGE_V1', 'cook_ledger_shared_data_v5', 'cook_ledger_shared_data_v4'];
+          for (const k of oldKeys) {
+            const data = localStorage.getItem(k);
+            if (data) { loaded = data; break; }
+          }
+        }
+
+        if (loaded) {
           try {
-            const parsed = JSON.parse(saved);
+            const parsed = JSON.parse(loaded);
             if (parsed.expenses) setExpenses(parsed.expenses);
             if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
             if (parsed.settlements) setSettlements(parsed.settlements);
             if (parsed.roommates) setRoommates(parsed.roommates);
-          } catch(e) { console.error(e); }
+            if (parsed.loggedInUserEmail) setLoggedInUserEmail(parsed.loggedInUserEmail);
+          } catch(e) { console.error('Data loading error:', e); }
         }
       }, []);
 
-      const saveData = (newExp, newDin, newSet, newRm) => {
+      const saveData = (newExp, newDin, newSet, newRm, newEmail) => {
         const payload = {
           expenses: newExp !== undefined ? newExp : expenses,
           dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
           settlements: newSet !== undefined ? newSet : settlements,
-          roommates: newRm !== undefined ? newRm : roommates
+          roommates: newRm !== undefined ? newRm : roommates,
+          loggedInUserEmail: newEmail !== undefined ? newEmail : loggedInUserEmail
         };
-        localStorage.setItem('cook_ledger_shared_data_v5', JSON.stringify(payload));
+        localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
       };
 
-      // 綁定 Google 帳號至特定的室友身份
-      const handleConfirmGoogleBind = () => {
-        if (!inputGoogleEmail || !inputGoogleEmail.includes('@')) {
-          alert('請輸入有效的 Google 電子郵件地址！');
+      useEffect(() => {
+        if (!loggedInUserEmail) {
+          setCurrentUser(null);
+          return;
+        }
+        const matched = roommates.find(r => r.googleEmail && r.googleEmail.toLowerCase() === loggedInUserEmail.toLowerCase());
+        if (matched) {
+          setCurrentUser(matched.id);
+        } else {
+          setCurrentUser(null);
+        }
+      }, [loggedInUserEmail, roommates]);
+
+      const handleLoginAndBind = (email, roommateId) => {
+        if (!email || !email.includes('@')) {
+          alert('請輸入有效的 Google 電子郵件！');
           return;
         }
 
-        const updated = roommates.map(r => 
-          r.id === selectedBindTarget ? { ...r, googleEmail: inputGoogleEmail.trim().toLowerCase() } : r
+        const cleanEmail = email.trim().toLowerCase();
+        
+        const existing = roommates.find(r => r.googleEmail === cleanEmail && r.id !== roommateId);
+        if (existing) {
+          alert(`⚠️ 此 Google 帳號已被室友 【${existing.name}】 綁定，無法重複綁定！`);
+          return;
+        }
+
+        const updatedRoommates = roommates.map(r => 
+          r.id === roommateId ? { ...r, googleEmail: cleanEmail } : r
         );
 
-        setRoommates(updated);
-        saveData(undefined, undefined, undefined, updated);
-        setCurrentUser(selectedBindTarget);
-        setShowBindModal(false);
-        setInputGoogleEmail('');
-        alert(`🎉 成功將 Google 帳號 (${inputGoogleEmail}) 綁定給室友 【${selectedBindTarget}】！`);
+        setRoommates(updatedRoommates);
+        setLoggedInUserEmail(cleanEmail);
+        saveData(undefined, undefined, undefined, updatedRoommates, cleanEmail);
+
+        setShowLoginModal(false);
+        setLoginEmailInput('');
+        alert(`🎉 登入成功！已驗證為室友 【${roommateId}】`);
       };
 
-      // 解除 Google 綁定
-      const handleUnbindGoogle = (personId) => {
-        if (confirm(`確定要解除 ${personId} 的 Google 帳號綁定嗎？`)) {
-          const updated = roommates.map(r => r.id === personId ? { ...r, googleEmail: null } : r);
-          setRoommates(updated);
-          saveData(undefined, undefined, undefined, updated);
+      const handleLogout = () => {
+        setLoggedInUserEmail(null);
+        setCurrentUser(null);
+        saveData(undefined, undefined, undefined, undefined, null);
+      };
+
+      const handleExportBackup = () => {
+        const payload = { expenses, dinnerAbsent, settlements, roommates };
+        const jsonStr = JSON.stringify(payload, null, 2);
+        navigator.clipboard.writeText(jsonStr);
+        alert('📋 數據已成功複製到剪貼簿！可將此備份文字妥善保存。');
+      };
+
+      const handleImportBackup = () => {
+        if (!backupJsonInput) return;
+        try {
+          const parsed = JSON.parse(backupJsonInput);
+          if (parsed.expenses) setExpenses(parsed.expenses);
+          if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
+          if (parsed.settlements) setSettlements(parsed.settlements);
+          if (parsed.roommates) setRoommates(parsed.roommates);
+
+          saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates, undefined);
+          setShowBackupModal(false);
+          setBackupJsonInput('');
+          alert('✅ 備份數據已成功匯入與恢復！');
+        } catch(e) {
+          alert('❌ 備份格式錯誤，請確認貼上的是正確的 JSON 數據。');
         }
       };
 
-      // 更換頭像
       const handleUpdateEmoji = (personId, newEmoji) => {
         if (!newEmoji) return;
         const updated = roommates.map(r => r.id === personId ? { ...r, emoji: newEmoji } : r);
         setRoommates(updated);
-        saveData(undefined, undefined, undefined, updated);
+        saveData(undefined, undefined, undefined, updated, undefined);
         setShowEmojiPickerFor(null);
         setCustomEmojiInput('');
       };
 
-      // 新增採購項目
+      // --- 新增採購項目 ---
       const [itemTitle, setItemTitle] = useState('');
       const [itemAmount, setItemAmount] = useState('');
-      const [itemCategory, setItemCategory] = useState('veg');
-      const [itemPayer, setItemPayer] = useState(currentUser);
-      const [itemDate, setItemDate] = useState(new Date().toISOString().split('T')[0]);
+      const [itemCategories, setItemCategories] = useState(['veg']);
+      const [itemDate, setItemDate] = useState(formatLocalDate(currentNowDate));
       const [itemSplit, setItemSplit] = useState(['Janice', 'Carrie', 'Kingsley']);
 
-      useEffect(() => {
-        setItemPayer(currentUser);
-      }, [currentUser]);
+      const toggleCategoryTag = (catId) => {
+        if (itemCategories.includes(catId)) {
+          if (itemCategories.length === 1) return alert('至少需選擇一個採購分類！');
+          setItemCategories(itemCategories.filter(id => id !== catId));
+        } else {
+          setItemCategories([...itemCategories, catId]);
+        }
+      };
 
-      // 當採購日期改變時，自動核對不回家吃的登記並排除分攤
       useEffect(() => {
         const absentList = dinnerAbsent[itemDate] || [];
         if (absentList.length > 0) {
@@ -186,51 +274,68 @@
 
       const handleAddExpense = (e) => {
         e.preventDefault();
+
+        if (!currentUser) {
+          alert('🔒 權限限制：請先登入 Google 帳號並驗證身份後再進行操作！');
+          return;
+        }
+
         if (!itemTitle || !itemAmount || parseFloat(itemAmount) <= 0 || itemSplit.length === 0) {
           alert('請填寫物品名稱、金額，並選擇至少一位分攤成員！');
           return;
         }
 
-        const currentRmObj = getRoommateObj(currentUser);
-
         const newEntry = {
           id: 'exp_' + Date.now(),
           title: itemTitle,
           amount: parseFloat(itemAmount),
-          category: itemCategory,
-          payer: itemPayer,
+          categories: itemCategories,
+          payer: currentUser,
           date: itemDate,
           splitWith: itemSplit,
           registeredBy: currentUser,
-          registeredGoogleEmail: currentRmObj.googleEmail || null,
+          registeredEmail: loggedInUserEmail,
           createdAt: new Date().toISOString()
         };
 
         const updated = [newEntry, ...expenses];
         setExpenses(updated);
-        saveData(updated, undefined, undefined, undefined);
+        saveData(updated, undefined, undefined, undefined, undefined);
 
         setItemTitle('');
         setItemAmount('');
         alert('✨ 成功加入採購明細！');
       };
 
-      // 僅限登記人刪除
       const handleDeleteExpense = (exp) => {
+        if (!currentUser) {
+          alert('🔒 請先登入 Google 帳號！');
+          return;
+        }
+
         if (exp.registeredBy !== currentUser) {
-          alert(`🔒 權限限制：此筆採購是由 ${exp.registeredBy} 登記的，只有登記人才可以刪除喔！`);
+          alert(`🔒 權限限制：此筆採購是由 ${exp.registeredBy} 登記的，只有登記本人才可以刪除喔！`);
           return;
         }
 
         if (confirm(`確定要刪除「${exp.title}」這筆紀錄嗎？`)) {
           const updated = expenses.filter(e => e.id !== exp.id);
           setExpenses(updated);
-          saveData(updated, undefined, undefined, undefined);
+          saveData(updated, undefined, undefined, undefined, undefined);
         }
       };
 
-      // 晚餐不回家吃登記
       const toggleDinnerAbsent = (dateStr, personId) => {
+        if (!currentUser) {
+          alert('🔒 請先登入 Google 帳號！');
+          return;
+        }
+
+        if (currentUser !== personId) {
+          alert(`🔒 權限限制：您目前是 ${currentUser}，只能修改自己當天「回家吃 / 不回家吃」的狀態喔！`);
+          return;
+        }
+
         const currentList = dinnerAbsent[dateStr] || [];
         const updatedList = currentList.includes(personId)
           ? currentList.filter(p => p !== personId)
@@ -238,7 +343,7 @@
 
         const updatedDinner = { ...dinnerAbsent, [dateStr]: updatedList };
         setDinnerAbsent(updatedDinner);
-        saveData(undefined, updatedDinner, undefined, undefined);
+        saveData(undefined, updatedDinner, undefined, undefined, undefined);
       };
 
       // 週計算
@@ -248,11 +353,13 @@
 
       const currentWeekExpenses = useMemo(() => {
         const start = new Date(currentWeekObj.startDate);
+        start.setHours(0,0,0,0);
         const end = new Date(currentWeekObj.endDate);
         end.setHours(23, 59, 59, 999);
 
         return expenses.filter(exp => {
-          const d = new Date(exp.date);
+          const parts = exp.date.split('-');
+          const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
           return d >= start && d <= end;
         });
       }, [expenses, currentWeekObj]);
@@ -305,9 +412,24 @@
         return { paidMap, oweMap, netMap, transfers };
       }, [currentWeekExpenses]);
 
-      const handleTogglePaymentStatus = (transferId, actionType) => {
+      const handleTogglePaymentStatus = (tr, actionType) => {
+        if (!currentUser) {
+          alert('🔒 請先登入 Google 帳號！');
+          return;
+        }
+
+        if (actionType === 'payer_pay' && currentUser !== tr.from) {
+          alert(`🔒 權限限制：此筆款項的付款方是 ${tr.from}，只能由 ${tr.from} 本人點擊標記付款！`);
+          return;
+        }
+
+        if (actionType === 'receiver_confirm' && currentUser !== tr.to) {
+          alert(`🔒 權限限制：此筆款項的收款方是 ${tr.to}，只能由 ${tr.to} 本人點擊確認消帳！`);
+          return;
+        }
+
         const weekSettles = settlements[selectedWeekKey] || {};
-        const currentStatus = weekSettles[transferId] || { payerPaid: false, receiverConfirmed: false };
+        const currentStatus = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
 
         let updatedStatus = { ...currentStatus };
         if (actionType === 'payer_pay') {
@@ -316,17 +438,17 @@
           updatedStatus.receiverConfirmed = !updatedStatus.receiverConfirmed;
         }
 
-        const updatedWeekSettles = { ...weekSettles, [transferId]: updatedStatus };
+        const updatedWeekSettles = { ...weekSettles, [tr.id]: updatedStatus };
         const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekSettles };
 
         setSettlements(updatedSettlements);
-        saveData(undefined, undefined, updatedSettlements, undefined);
+        saveData(undefined, undefined, updatedSettlements, undefined, undefined);
       };
 
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
       const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
 
-      const currentRmUserObj = getRoommateObj(currentUser);
+      const currentRmUserObj = currentUser ? getRoommateObj(currentUser) : null;
 
       return (
         <div className="max-w-3xl mx-auto p-4 pb-24">
@@ -336,46 +458,73 @@
               <div className="flex items-center gap-2">
                 <span className="text-3xl">🏠</span>
                 <h1 className="text-2xl font-bold text-slate-800 tracking-tight">204室小帳本</h1>
+                {isNetworkTimeSynced && (
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full" title="線上天文台校準時間">
+                    🌐 網絡校時已連線
+                  </span>
+                )}
               </div>
               <p className="text-xs text-rose-500 font-medium mt-1">Janice • Carrie • Kingsley 買菜與晚餐記錄小幫手</p>
             </div>
 
-            {/* Google 帳號連線與角色切換 */}
-            <div className="flex flex-col gap-2 items-end">
-              <button
-                onClick={() => {
-                  setSelectedBindTarget(currentUser);
-                  setShowBindModal(true);
-                }}
-                className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold px-3 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-sm transition"
-              >
-                <i className="fa-brands fa-google text-red-500"></i>
-                <span>{currentRmUserObj.googleEmail ? `已連線: ${currentRmUserObj.googleEmail}` : '繫結 Google 帳號'}</span>
-              </button>
+            {/* Google 帳號與備份 */}
+            <div className="flex flex-col gap-2 items-start md:items-end">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowBackupModal(true)}
+                  className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-1.5 rounded-full text-xs transition flex items-center gap-1.5"
+                  title="數據備份與匯入"
+                >
+                  <i className="fa-solid fa-database"></i>
+                  <span>數據備份</span>
+                </button>
 
-              {/* 切換目前使用者 */}
-              <div className="bg-amber-50/80 p-2 rounded-2xl border border-amber-200 flex items-center gap-2">
-                <span className="text-xs font-bold text-amber-800">👤 目前操作：</span>
-                <div className="flex gap-1">
-                  {roommates.map(r => (
-                    <button
-                      key={r.id}
-                      onClick={() => setCurrentUser(r.id)}
-                      className={`px-3 py-1 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
-                        currentUser === r.id 
-                          ? 'bg-rose-500 text-white shadow-md' 
-                          : 'bg-white text-slate-600 hover:bg-rose-100 border border-slate-200'
-                      }`}
-                    >
-                      <span>{r.emoji}</span>
-                      <span>{r.name}</span>
-                      {r.googleEmail && <span className="text-[9px] bg-white/30 px-1 rounded">G</span>}
+                {currentUser ? (
+                  <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs px-3.5 py-1.5 rounded-full flex items-center gap-2 font-bold shadow-sm">
+                    <span className="text-base">{currentRmUserObj.emoji}</span>
+                    <span>{currentUser} ({loggedInUserEmail})</span>
+                    <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600 ml-1" title="登出">
+                      <i className="fa-solid fa-right-from-bracket"></i>
                     </button>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowLoginModal(true)}
+                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-4 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-md transition"
+                  >
+                    <i className="fa-brands fa-google"></i>
+                    <span>登入 Google 驗證身份</span>
+                  </button>
+                )}
+              </div>
+
+              {/* 室友身分說明 */}
+              <div className="bg-amber-50/80 px-3 py-1.5 rounded-2xl border border-amber-200 flex items-center gap-2 text-xs">
+                <span className="font-bold text-amber-800">👤 目前身份：</span>
+                {currentUser ? (
+                  <span className="font-bold text-emerald-700">🔒 已鎖定為 {currentRmUserObj.emoji} {currentUser}</span>
+                ) : (
+                  <span className="text-rose-600 font-bold">🔒 未登入 (唯讀模式)</span>
+                )}
               </div>
             </div>
           </header>
+
+          {/* 未登入警告 Banner */}
+          {!currentUser && (
+            <div className="bg-amber-100/80 border-2 border-amber-300 rounded-3xl p-4 mb-5 flex items-center justify-between text-xs font-bold text-amber-900 shadow-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🔒</span>
+                <span>您目前尚未登入 Google 帳號！您可以查看歷史帳目，但**需登入後方可新增費用、登記晚餐或進行付款消帳**。</span>
+              </div>
+              <button
+                onClick={() => setShowLoginModal(true)}
+                className="bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-1.5 rounded-2xl shrink-0 font-bold ml-2 shadow transition"
+              >
+                區域登入
+              </button>
+            </div>
+          )}
 
           {/* 全 Emoji 個人頭像選單 */}
           <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -489,10 +638,10 @@
           {activeTab === 'expenses' && (
             <div className="space-y-5">
               {/* 新增表單 */}
-              <form onSubmit={handleAddExpense} className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
+              <form onSubmit={handleAddExpense} className={`bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100 ${!currentUser ? 'opacity-60' : ''}`}>
                 <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
                   <span className="text-xl">🍓</span>
-                  新增採購紀錄
+                  新增採購紀錄 {!currentUser && <span className="text-xs text-rose-500 font-bold">(🔒 需登入)</span>}
                 </h2>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -503,7 +652,8 @@
                       placeholder="例：Waitrose 牛排 & 鮮奶"
                       value={itemTitle}
                       onChange={(e) => setItemTitle(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
+                      disabled={!currentUser}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400 disabled:cursor-not-allowed"
                     />
                   </div>
 
@@ -515,22 +665,24 @@
                       placeholder="0.00"
                       value={itemAmount}
                       onChange={(e) => setItemAmount(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold text-rose-600 focus:outline-none focus:border-rose-400"
+                      disabled={!currentUser}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold text-rose-600 focus:outline-none focus:border-rose-400 disabled:cursor-not-allowed"
                     />
                   </div>
                 </div>
 
-                {/* 採購物品類別標籤 */}
+                {/* 採購類別標籤多選 */}
                 <div className="mt-4">
-                  <label className="block text-xs font-bold text-slate-600 mb-2">物品分類 (點擊切換)</label>
+                  <label className="block text-xs font-bold text-slate-600 mb-2">物品分類標籤 (可多選)：</label>
                   <div className="flex flex-wrap gap-2">
                     {CATEGORIES.map(c => {
-                      const isSelected = itemCategory === c.id;
+                      const isSelected = itemCategories.includes(c.id);
                       return (
                         <button
                           type="button"
                           key={c.id}
-                          onClick={() => setItemCategory(c.id)}
+                          disabled={!currentUser}
+                          onClick={() => toggleCategoryTag(c.id)}
                           className={`px-3 py-1.5 rounded-2xl text-xs font-bold border-2 transition flex items-center gap-1.5 ${
                             isSelected 
                               ? `${c.color} ring-2 ring-rose-300 scale-105 shadow-sm` 
@@ -539,6 +691,7 @@
                         >
                           <span>{c.emoji}</span>
                           <span>{c.name}</span>
+                          {isSelected && <i className="fa-solid fa-check text-[10px] ml-0.5"></i>}
                         </button>
                       );
                     })}
@@ -552,28 +705,22 @@
                       type="date"
                       value={itemDate}
                       onChange={(e) => setItemDate(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
+                      disabled={!currentUser}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400 disabled:cursor-not-allowed"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">先付人 (Payer)</label>
-                    <div className="flex gap-2">
-                      {roommates.map(r => (
-                        <button
-                          type="button"
-                          key={r.id}
-                          onClick={() => setItemPayer(r.id)}
-                          className={`flex-1 py-2 rounded-2xl text-xs font-bold border-2 transition flex items-center justify-center gap-1 ${
-                            itemPayer === r.id
-                              ? 'bg-rose-500 text-white border-rose-500 shadow-sm'
-                              : 'bg-slate-50 text-slate-600 border-slate-200'
-                          }`}
-                        >
-                          <span>{r.emoji}</span>
-                          <span>{r.name}</span>
-                        </button>
-                      ))}
+                    <label className="block text-xs font-bold text-slate-600 mb-1">先付人 (Payer - 鎖定本人)</label>
+                    <div className="bg-slate-100 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-xs font-bold text-slate-700 flex items-center gap-2">
+                      {currentUser ? (
+                        <>
+                          <span>{currentRmUserObj.emoji}</span>
+                          <span>{currentUser} (自動鎖定登記人)</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-400">🔒 請先登入 Google 帳號</span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -596,6 +743,7 @@
                           <input
                             type="checkbox"
                             checked={isChecked}
+                            disabled={!currentUser}
                             onChange={() => {
                               if (isChecked) {
                                 if (itemSplit.length === 1) return alert('至少需要一位分攤成員！');
@@ -616,12 +764,12 @@
 
                 <div className="mt-5 pt-3 border-t border-rose-100 flex items-center justify-between">
                   <span className="text-xs text-slate-500 font-medium">
-                    📝 登記人：<strong className="text-slate-800">{currentRmUserObj.emoji} {currentUser}</strong>
-                    {currentRmUserObj.googleEmail && <span className="text-[10px] text-rose-400 ml-1">({currentRmUserObj.googleEmail})</span>}
+                    📝 登記人：<strong className="text-slate-800">{currentUser ? `${currentRmUserObj.emoji} ${currentUser}` : '未登入'}</strong>
                   </span>
                   <button
                     type="submit"
-                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-6 py-2.5 rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-2 text-sm"
+                    disabled={!currentUser}
+                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-6 py-2.5 rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-2 text-sm disabled:bg-slate-300 disabled:cursor-not-allowed"
                   >
                     <i className="fa-solid fa-heart"></i>
                     確認加入
@@ -649,21 +797,26 @@
                 ) : (
                   <div className="space-y-3">
                     {currentWeekExpenses.map(exp => {
-                      const cat = getCategoryObj(exp.category);
-                      const isMyRecord = exp.registeredBy === currentUser;
+                      const catIds = exp.categories || [exp.category];
+                      const isMyRecord = currentUser && exp.registeredBy === currentUser;
 
                       return (
                         <div key={exp.id} className="cute-card p-4 rounded-2xl border-2 border-rose-50 bg-rose-50/20 flex items-center justify-between">
                           <div>
-                            <div className="flex items-center gap-2">
-                              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${cat.color}`}>
-                                {cat.emoji} {cat.name}
-                              </span>
-                              <span className="font-bold text-slate-800">{exp.title}</span>
-                              <span className="text-rose-600 font-extrabold text-base">£{exp.amount.toFixed(2)}</span>
+                            <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                              {catIds.map(cid => {
+                                const cat = getCategoryObj(cid);
+                                return (
+                                  <span key={cid} className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${cat.color}`}>
+                                    {cat.emoji} {cat.name}
+                                  </span>
+                                );
+                              })}
+                              <span className="font-bold text-slate-800 ml-1">{exp.title}</span>
+                              <span className="text-rose-600 font-extrabold text-base ml-1">£{exp.amount.toFixed(2)}</span>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-2">
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-1">
                               <span>📅 {exp.date}</span>
                               <span>💳 {getRoommateObj(exp.payer).emoji} {exp.payer} 先付</span>
                               <span>👥 分攤：{exp.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
@@ -680,8 +833,8 @@
                               <i className="fa-solid fa-trash-can"></i>
                             </button>
                           ) : (
-                            <span className="text-[10px] text-slate-300 font-medium bg-slate-100 px-2 py-1 rounded-lg" title="僅登記人可刪除">
-                              🔒 僅登記人
+                            <span className="text-[10px] text-slate-300 font-medium bg-slate-100 px-2 py-1 rounded-lg" title="僅登記本人可刪除">
+                              🔒 僅 {exp.registeredBy}
                             </span>
                           )}
                         </div>
@@ -700,13 +853,13 @@
                 <span className="text-xl">🌙</span>
                 本週晚餐「不回家吃」登記表
               </h2>
-              <p className="text-xs text-slate-400 mb-4">點擊切換狀態，登記不回家吃會自動排除當日採購分攤！</p>
+              <p className="text-xs text-slate-400 mb-4">🔒 權限提示：每位室友僅可切換屬於自己的晚餐狀況。</p>
 
               <div className="space-y-3">
                 {[0, 1, 2, 3, 4, 5, 6].map(offset => {
-                  const dateObj = new Date(currentWeekObj.startDate);
-                  dateObj.setDate(dateObj.getDate() + offset);
-                  const dateStr = dateObj.toISOString().split('T')[0];
+                  const startDateParts = currentWeekObj.key.split('-');
+                  const dateObj = new Date(parseInt(startDateParts[0]), parseInt(startDateParts[1]) - 1, parseInt(startDateParts[2]) + offset);
+                  const dateStr = formatLocalDate(dateObj);
                   const dayNames = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
                   const absentList = dinnerAbsent[dateStr] || [];
 
@@ -717,6 +870,8 @@
                       <div className="flex gap-2">
                         {roommates.map(r => {
                           const isAbsent = absentList.includes(r.id);
+                          const isSelf = currentUser === r.id;
+
                           return (
                             <button
                               key={r.id}
@@ -725,11 +880,13 @@
                                 isAbsent 
                                   ? 'bg-rose-100 text-rose-700 border-rose-300' 
                                   : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                              }`}
+                              } ${!isSelf ? 'opacity-60 cursor-not-allowed' : ''}`}
+                              title={isSelf ? '點擊切換' : `🔒 僅限 ${r.name} 操作`}
                             >
                               <span>{r.emoji}</span>
                               <span>{r.name}</span>
                               <span>{isAbsent ? '❌ 不回家吃' : '🍽️ 在家吃'}</span>
+                              {!isSelf && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
                             </button>
                           );
                         })}
@@ -770,10 +927,11 @@
 
               {/* 轉帳與消帳清單 */}
               <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
-                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
                   <span className="text-xl">💰</span>
                   轉帳清單與雙方消帳確認
                 </h3>
+                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。</p>
 
                 {weeklyCalculation.transfers.length === 0 ? (
                   <div className="text-center py-8 text-emerald-600 font-bold text-sm">
@@ -788,6 +946,9 @@
 
                       const fromObj = getRoommateObj(tr.from);
                       const toObj = getRoommateObj(tr.to);
+
+                      const canIPay = currentUser === tr.from;
+                      const canIConfirm = currentUser === tr.to;
 
                       return (
                         <div key={tr.id} className={`p-4 rounded-2xl border-2 transition ${
@@ -814,32 +975,33 @@
                             </div>
                           </div>
 
-                          {/* 雙方確認區域 */}
                           <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
                             <button
-                              onClick={() => handleTogglePaymentStatus(tr.id, 'payer_pay')}
+                              onClick={() => handleTogglePaymentStatus(tr, 'payer_pay')}
                               className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
                                 status.payerPaid
                                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                                   : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
-                              }`}
+                              } ${!canIPay ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
-                              <span>付款方 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '點擊標記付款'}</span>
+                              <span>付款 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '標記已付款'}</span>
+                              {!canIPay && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
                             </button>
 
                             <button
-                              onClick={() => handleTogglePaymentStatus(tr.id, 'receiver_confirm')}
+                              onClick={() => handleTogglePaymentStatus(tr, 'receiver_confirm')}
                               className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
                                 status.receiverConfirmed
                                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                                   : status.payerPaid 
                                     ? 'bg-rose-500 text-white shadow hover:bg-rose-600' 
                                     : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
-                              }`}
+                              } ${!canIConfirm ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                               <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
-                              <span>收款方 ({toObj.name})：{status.receiverConfirmed ? '已確認收款' : '確認收到並消帳'}</span>
+                              <span>收款 ({toObj.name})：{status.receiverConfirmed ? '已確認消帳' : '確認收到並消帳'}</span>
+                              {!canIConfirm && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
                             </button>
                           </div>
                         </div>
@@ -851,68 +1013,103 @@
             </div>
           )}
 
-          {/* Google 帳號綁定 Modal */}
-          {showBindModal && (
+          {/* Google 登入驗證 Modal */}
+          {showLoginModal && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
                 <div className="flex justify-between items-center">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
                     <i className="fa-brands fa-google text-red-500"></i>
-                    綁定 Google 帳號身份
+                    Google 帳號身份驗證
                   </h3>
-                  <button onClick={() => setShowBindModal(false)} className="text-slate-400 hover:text-slate-600">
+                  <button onClick={() => setShowLoginModal(false)} className="text-slate-400 hover:text-slate-600">
                     <i className="fa-solid fa-xmark text-lg"></i>
                   </button>
                 </div>
 
-                {/* 選擇要綁定的室友 */}
-                <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1">選擇你要綁定的室友身份：</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {roommates.map(r => (
-                      <button
-                        key={r.id}
-                        type="button"
-                        onClick={() => setSelectedBindTarget(r.id)}
-                        className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
-                          selectedBindTarget === r.id
-                            ? 'bg-rose-50 border-rose-500 text-rose-700'
-                            : 'bg-slate-50 border-slate-200 text-slate-600'
-                        }`}
-                      >
-                        <span className="text-lg">{r.emoji}</span>
-                        <span>{r.name}</span>
-                      </button>
-                    ))}
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">請選擇你是哪位室友：</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {roommates.map(r => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setBindTarget(r.id)}
+                          className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
+                            bindTarget === r.id
+                              ? 'bg-rose-50 border-rose-500 text-rose-700'
+                              : 'bg-slate-50 border-slate-200 text-slate-600'
+                          }`}
+                        >
+                          <span className="text-lg">{r.emoji}</span>
+                          <span>{r.name}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-600 mb-1">Google 電子郵件 (Email)：</label>
-                  <input
-                    type="email"
-                    placeholder="your-name@gmail.com"
-                    value={inputGoogleEmail}
-                    onChange={(e) => setInputGoogleEmail(e.target.value)}
-                    className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
-                  />
-                </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">Google 電子郵件 (Email)：</label>
+                    <input
+                      type="email"
+                      placeholder="your-name@gmail.com"
+                      value={loginEmailInput}
+                      onChange={(e) => setLoginEmailInput(e.target.value)}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
+                    />
+                  </div>
 
-                <div className="flex gap-2 pt-2">
                   <button
-                    onClick={handleConfirmGoogleBind}
-                    className="flex-1 bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
+                    onClick={() => handleLoginAndBind(loginEmailInput, bindTarget)}
+                    className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
                   >
-                    確認綁定身份
+                    驗證並綁定登入
                   </button>
-                  {getRoommateObj(selectedBindTarget).googleEmail && (
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 數據備份 Modal */}
+          {showBackupModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border-2 border-rose-100 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-database text-rose-500"></i>
+                    數據備份與匯入
+                  </h3>
+                  <button onClick={() => setShowBackupModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <button
+                    onClick={handleExportBackup}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 rounded-2xl shadow transition text-xs flex items-center justify-center gap-2"
+                  >
+                    <i className="fa-solid fa-copy"></i>
+                    一鍵複製現有帳本備份 (Copy JSON)
+                  </button>
+
+                  <div className="pt-2 border-t border-slate-200">
+                    <label className="block text-xs font-bold text-slate-600 mb-1">匯入舊數據備份 (貼上 JSON)：</label>
+                    <textarea
+                      rows="4"
+                      value={backupJsonInput}
+                      onChange={(e) => setBackupJsonInput(e.target.value)}
+                      placeholder='貼上包含 {"expenses": [...]} 的備份文字'
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl p-2.5 text-xs font-mono focus:outline-none focus:border-rose-400"
+                    ></textarea>
                     <button
-                      onClick={() => handleUnbindGoogle(selectedBindTarget)}
-                      className="bg-slate-100 text-slate-600 font-bold px-3 py-2.5 rounded-2xl hover:bg-slate-200 transition text-xs"
+                      onClick={handleImportBackup}
+                      className="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-2 rounded-2xl shadow transition text-xs mt-2"
                     >
-                      解除綁定
+                      確認匯入數據
                     </button>
-                  )}
+                  </div>
                 </div>
               </div>
             </div>
