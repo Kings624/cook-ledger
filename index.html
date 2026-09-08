@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>🏡 室友溫馨煮飯與採購帳本</title>
+  <title>204室小帳本</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- React & ReactDOM -->
@@ -13,9 +13,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <!-- FontAwesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-  <!-- Google Identity Services (GIS) SDK -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google Fonts: Rounded & Friendly Font -->
+  <!-- Google Fonts -->
   <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     body { font-family: 'Fredoka', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif; }
@@ -29,7 +27,7 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo } = React;
 
-    // 採購類別選單
+    // 採購類別標籤
     const CATEGORIES = [
       { id: 'veg', name: '蔬菜水果', emoji: '🥦', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
       { id: 'meat', name: '肉類海鮮', emoji: '🥩', color: 'bg-rose-100 text-rose-800 border-rose-300' },
@@ -39,13 +37,18 @@
       { id: 'other', name: '其他採購', emoji: '🛍️', color: 'bg-slate-100 text-slate-800 border-slate-300' }
     ];
 
-    // 預設可供選擇的 Emoji 選項
-    const EMOJI_PALETTE = ['👩🏻‍🍳', '👩🏼‍🌾', '👨🏻‍🍳', '🐱', '🐰', '🐶', '🍓', '🥑', '🥞', '🥐', '🍣', '🧋', '🧸', '🌸', '💫', '💖'];
+    // 全分類 Emoji 清單
+    const EMOJI_CATEGORIES = [
+      { name: '表情角色', emojis: ['👩🏻‍🍳', '👩🏼‍🌾', '👨🏻‍🍳', '🤴🏻', '👸🏻', '🥷🏻', '🧙🏻‍♀️', '🧑‍🍳', '🕵🏻‍♂️', '💃🏻', '🕺🏻'] },
+      { name: '可愛動物', emojis: ['🐱', '🐶', '🐰', '🦊', '🐻', '🐼', '🐨', '🦁', '🐯', '🐸', '🐧', '🐥', '🦄', '🦦'] },
+      { name: '美味食物', emojis: ['🥑', '🥦', '🥩', '🍞', '🥐', '🥞', '🍕', '🍔', '🍟', '🍣', '🍱', '🍦', '🍰', '🧋', '☕️', '🍓'] },
+      { name: '生活日常', emojis: ['💖', '🌟', '🌸', '🧸', '🎮', '⚽️', '🏀', '🎨', '✈️', '🚀', '💡', '🎧', '🍷', '🍺'] }
+    ];
 
     const INITIAL_ROOMMATES = [
-      { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳' },
-      { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾' },
-      { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳' }
+      { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳', googleEmail: null },
+      { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾', googleEmail: null },
+      { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', googleEmail: null }
     ];
 
     // 生成過去 13 週 (約 3 個月) 週選項
@@ -85,9 +88,12 @@
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [currentUser, setCurrentUser] = useState('Kingsley');
       const [showEmojiPickerFor, setShowEmojiPickerFor] = useState(null);
+      const [customEmojiInput, setCustomEmojiInput] = useState('');
 
-      // Google 帳號狀態
-      const [googleUser, setGoogleUser] = useState(null);
+      // Google 綁定彈窗狀態
+      const [showBindModal, setShowBindModal] = useState(false);
+      const [selectedBindTarget, setSelectedBindTarget] = useState('Kingsley');
+      const [inputGoogleEmail, setInputGoogleEmail] = useState('');
 
       // 資料狀態
       const [expenses, setExpenses] = useState([]);
@@ -96,7 +102,7 @@
 
       // 載入與儲存數據
       useEffect(() => {
-        const saved = localStorage.getItem('cook_ledger_shared_data_v3');
+        const saved = localStorage.getItem('cook_ledger_shared_data_v5');
         if (saved) {
           try {
             const parsed = JSON.parse(saved);
@@ -115,51 +121,48 @@
           settlements: newSet !== undefined ? newSet : settlements,
           roommates: newRm !== undefined ? newRm : roommates
         };
-        localStorage.setItem('cook_ledger_shared_data_v3', JSON.stringify(payload));
+        localStorage.setItem('cook_ledger_shared_data_v5', JSON.stringify(payload));
       };
 
-      // 初始化 Google 登入 SDK
-      useEffect(() => {
-        if (window.google && window.google.accounts) {
-          try {
-            window.google.accounts.id.initialize({
-              client_id: "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com", // 可替換為註冊的 Client ID
-              callback: handleGoogleLoginResponse
-            });
-            window.google.accounts.id.renderButton(
-              document.getElementById("googleBtnContainer"),
-              { theme: "outline", size: "medium", shape: "pill", text: "signin_with" }
-            );
-          } catch(e) { console.log('Google Sign In SDK Notice:', e); }
+      // 綁定 Google 帳號至特定的室友身份
+      const handleConfirmGoogleBind = () => {
+        if (!inputGoogleEmail || !inputGoogleEmail.includes('@')) {
+          alert('請輸入有效的 Google 電子郵件地址！');
+          return;
         }
-      }, []);
 
-      const handleGoogleLoginResponse = (response) => {
-        try {
-          // 解析 Google JWT Token 取得用戶資料
-          const base64Url = response.credential.split('.')[1];
-          const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-          const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
-          const profile = JSON.parse(jsonPayload);
+        const updated = roommates.map(r => 
+          r.id === selectedBindTarget ? { ...r, googleEmail: inputGoogleEmail.trim().toLowerCase() } : r
+        );
 
-          setGoogleUser({
-            name: profile.name,
-            email: profile.email,
-            picture: profile.picture
-          });
-          alert(`🎉 歡迎登入！Google 帳號：${profile.name} (${profile.email})`);
-        } catch(e) { console.error(e); }
+        setRoommates(updated);
+        saveData(undefined, undefined, undefined, updated);
+        setCurrentUser(selectedBindTarget);
+        setShowBindModal(false);
+        setInputGoogleEmail('');
+        alert(`🎉 成功將 Google 帳號 (${inputGoogleEmail}) 綁定給室友 【${selectedBindTarget}】！`);
       };
 
-      // --- 更換室友頭像 Emoji ---
+      // 解除 Google 綁定
+      const handleUnbindGoogle = (personId) => {
+        if (confirm(`確定要解除 ${personId} 的 Google 帳號綁定嗎？`)) {
+          const updated = roommates.map(r => r.id === personId ? { ...r, googleEmail: null } : r);
+          setRoommates(updated);
+          saveData(undefined, undefined, undefined, updated);
+        }
+      };
+
+      // 更換頭像
       const handleUpdateEmoji = (personId, newEmoji) => {
+        if (!newEmoji) return;
         const updated = roommates.map(r => r.id === personId ? { ...r, emoji: newEmoji } : r);
         setRoommates(updated);
         saveData(undefined, undefined, undefined, updated);
         setShowEmojiPickerFor(null);
+        setCustomEmojiInput('');
       };
 
-      // --- 新增採購項目 ---
+      // 新增採購項目
       const [itemTitle, setItemTitle] = useState('');
       const [itemAmount, setItemAmount] = useState('');
       const [itemCategory, setItemCategory] = useState('veg');
@@ -171,7 +174,7 @@
         setItemPayer(currentUser);
       }, [currentUser]);
 
-      // 當日期變更時，自動過濾「不回家吃」的室友
+      // 當採購日期改變時，自動核對不回家吃的登記並排除分攤
       useEffect(() => {
         const absentList = dinnerAbsent[itemDate] || [];
         if (absentList.length > 0) {
@@ -184,9 +187,11 @@
       const handleAddExpense = (e) => {
         e.preventDefault();
         if (!itemTitle || !itemAmount || parseFloat(itemAmount) <= 0 || itemSplit.length === 0) {
-          alert('請填寫買菜名稱、金額，並選擇至少一位分攤人！');
+          alert('請填寫物品名稱、金額，並選擇至少一位分攤成員！');
           return;
         }
+
+        const currentRmObj = getRoommateObj(currentUser);
 
         const newEntry = {
           id: 'exp_' + Date.now(),
@@ -197,7 +202,7 @@
           date: itemDate,
           splitWith: itemSplit,
           registeredBy: currentUser,
-          googleEmail: googleUser ? googleUser.email : null,
+          registeredGoogleEmail: currentRmObj.googleEmail || null,
           createdAt: new Date().toISOString()
         };
 
@@ -213,7 +218,7 @@
       // 僅限登記人刪除
       const handleDeleteExpense = (exp) => {
         if (exp.registeredBy !== currentUser) {
-          alert(`🔒 權限限制：此筆採購是由 ${exp.registeredBy} 登記的，只有登記人才能刪除喔！`);
+          alert(`🔒 權限限制：此筆採購是由 ${exp.registeredBy} 登記的，只有登記人才可以刪除喔！`);
           return;
         }
 
@@ -224,7 +229,7 @@
         }
       };
 
-      // 晚餐登記切換
+      // 晚餐不回家吃登記
       const toggleDinnerAbsent = (dateStr, personId) => {
         const currentList = dinnerAbsent[dateStr] || [];
         const updatedList = currentList.includes(personId)
@@ -236,7 +241,7 @@
         saveData(undefined, updatedDinner, undefined, undefined);
       };
 
-      // 當週數據計算
+      // 週計算
       const currentWeekObj = useMemo(() => {
         return weeksList.find(w => w.key === selectedWeekKey) || weeksList[0];
       }, [selectedWeekKey, weeksList]);
@@ -321,31 +326,34 @@
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
       const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
 
+      const currentRmUserObj = getRoommateObj(currentUser);
+
       return (
         <div className="max-w-3xl mx-auto p-4 pb-24">
-          {/* 可愛頂部 Header */}
+          {/* Header：204室小帳本 */}
           <header className="bg-white rounded-3xl p-6 shadow-sm mb-5 border-2 border-rose-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-3xl">🏡</span>
-                <h1 className="text-2xl font-bold text-slate-800 tracking-tight">室友溫馨採購帳本</h1>
+                <span className="text-3xl">🏠</span>
+                <h1 className="text-2xl font-bold text-slate-800 tracking-tight">204室小帳本</h1>
               </div>
               <p className="text-xs text-rose-500 font-medium mt-1">Janice • Carrie • Kingsley 買菜與晚餐記錄小幫手</p>
             </div>
 
-            {/* Google 登入狀態與角色切換 */}
+            {/* Google 帳號連線與角色切換 */}
             <div className="flex flex-col gap-2 items-end">
-              {/* Google 帳號顯示 */}
-              <div id="googleBtnContainer" className="flex items-center gap-2">
-                {googleUser ? (
-                  <div className="bg-rose-50 border border-rose-200 text-xs px-3 py-1.5 rounded-full flex items-center gap-2 text-rose-700 font-medium">
-                    <img src={googleUser.picture} className="w-5 h-5 rounded-full" />
-                    <span>{googleUser.name}</span>
-                  </div>
-                ) : null}
-              </div>
+              <button
+                onClick={() => {
+                  setSelectedBindTarget(currentUser);
+                  setShowBindModal(true);
+                }}
+                className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold px-3 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-sm transition"
+              >
+                <i className="fa-brands fa-google text-red-500"></i>
+                <span>{currentRmUserObj.googleEmail ? `已連線: ${currentRmUserObj.googleEmail}` : '繫結 Google 帳號'}</span>
+              </button>
 
-              {/* 切換目前角色 */}
+              {/* 切換目前使用者 */}
               <div className="bg-amber-50/80 p-2 rounded-2xl border border-amber-200 flex items-center gap-2">
                 <span className="text-xs font-bold text-amber-800">👤 目前操作：</span>
                 <div className="flex gap-1">
@@ -361,6 +369,7 @@
                     >
                       <span>{r.emoji}</span>
                       <span>{r.name}</span>
+                      {r.googleEmail && <span className="text-[9px] bg-white/30 px-1 rounded">G</span>}
                     </button>
                   ))}
                 </div>
@@ -368,36 +377,58 @@
             </div>
           </header>
 
-          {/* 室友自選 Emoji 頭像專區 */}
-          <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex items-center justify-between">
+          {/* 全 Emoji 個人頭像選單 */}
+          <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
               <span className="text-base">🎨</span>
-              <span>自訂個人頭像 Emoji：</span>
+              <span>自訂個人 Emoji 頭像：</span>
             </div>
             <div className="flex gap-3">
               {roommates.map(r => (
                 <div key={r.id} className="relative">
                   <button
                     onClick={() => setShowEmojiPickerFor(showEmojiPickerFor === r.id ? null : r.id)}
-                    className="bg-rose-50 hover:bg-rose-100 border border-rose-200 px-3 py-1.5 rounded-2xl text-xs font-bold flex items-center gap-1 transition"
-                    title="點擊更換頭像"
+                    className="bg-rose-50 hover:bg-rose-100 border border-rose-200 px-3 py-1.5 rounded-2xl text-xs font-bold flex items-center gap-1.5 transition"
                   >
                     <span className="text-lg">{r.emoji}</span>
                     <span className="text-slate-700">{r.name}</span>
                     <i className="fa-solid fa-pen text-[10px] text-rose-400"></i>
                   </button>
 
-                  {/* Popover Emoji Picker */}
+                  {/* 豐富 Emoji 選擇選單 */}
                   {showEmojiPickerFor === r.id && (
-                    <div className="absolute right-0 top-10 bg-white p-3 rounded-2xl shadow-xl border-2 border-rose-200 z-50 w-52 grid grid-cols-4 gap-2">
-                      {EMOJI_PALETTE.map(emoji => (
+                    <div className="absolute right-0 top-11 bg-white p-4 rounded-3xl shadow-2xl border-2 border-rose-200 z-50 w-72 max-h-80 overflow-y-auto space-y-3">
+                      <div className="flex gap-2 border-b border-rose-100 pb-2">
+                        <input
+                          type="text"
+                          placeholder="輸入/貼上任何 Emoji"
+                          value={customEmojiInput}
+                          onChange={(e) => setCustomEmojiInput(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-xs"
+                        />
                         <button
-                          key={emoji}
-                          onClick={() => handleUpdateEmoji(r.id, emoji)}
-                          className="text-2xl hover:scale-125 transition p-1 text-center"
+                          onClick={() => handleUpdateEmoji(r.id, customEmojiInput)}
+                          className="bg-rose-500 text-white px-3 py-1 rounded-xl text-xs font-bold shrink-0"
                         >
-                          {emoji}
+                          套用
                         </button>
+                      </div>
+
+                      {EMOJI_CATEGORIES.map(cat => (
+                        <div key={cat.name}>
+                          <div className="text-[10px] font-bold text-slate-400 mb-1">{cat.name}</div>
+                          <div className="grid grid-cols-6 gap-1">
+                            {cat.emojis.map(emoji => (
+                              <button
+                                key={emoji}
+                                onClick={() => handleUpdateEmoji(r.id, emoji)}
+                                className="text-xl hover:scale-125 transition p-1 text-center"
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -406,7 +437,7 @@
             </div>
           </div>
 
-          {/* 週選擇與導覽列 */}
+          {/* 週選擇導覽列 */}
           <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <i className="fa-solid fa-calendar-heart text-rose-500 text-lg"></i>
@@ -487,21 +518,34 @@
                       className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold text-rose-600 focus:outline-none focus:border-rose-400"
                     />
                   </div>
+                </div>
 
-                  {/* 物品類別選擇 */}
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">物品分類</label>
-                    <select
-                      value={itemCategory}
-                      onChange={(e) => setItemCategory(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold focus:outline-none focus:border-rose-400"
-                    >
-                      {CATEGORIES.map(c => (
-                        <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>
-                      ))}
-                    </select>
+                {/* 採購物品類別標籤 */}
+                <div className="mt-4">
+                  <label className="block text-xs font-bold text-slate-600 mb-2">物品分類 (點擊切換)</label>
+                  <div className="flex flex-wrap gap-2">
+                    {CATEGORIES.map(c => {
+                      const isSelected = itemCategory === c.id;
+                      return (
+                        <button
+                          type="button"
+                          key={c.id}
+                          onClick={() => setItemCategory(c.id)}
+                          className={`px-3 py-1.5 rounded-2xl text-xs font-bold border-2 transition flex items-center gap-1.5 ${
+                            isSelected 
+                              ? `${c.color} ring-2 ring-rose-300 scale-105 shadow-sm` 
+                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <span>{c.emoji}</span>
+                          <span>{c.name}</span>
+                        </button>
+                      );
+                    })}
                   </div>
+                </div>
 
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
                   <div>
                     <label className="block text-xs font-bold text-slate-600 mb-1">採購日期</label>
                     <input
@@ -510,6 +554,27 @@
                       onChange={(e) => setItemDate(e.target.value)}
                       className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">先付人 (Payer)</label>
+                    <div className="flex gap-2">
+                      {roommates.map(r => (
+                        <button
+                          type="button"
+                          key={r.id}
+                          onClick={() => setItemPayer(r.id)}
+                          className={`flex-1 py-2 rounded-2xl text-xs font-bold border-2 transition flex items-center justify-center gap-1 ${
+                            itemPayer === r.id
+                              ? 'bg-rose-500 text-white border-rose-500 shadow-sm'
+                              : 'bg-slate-50 text-slate-600 border-slate-200'
+                          }`}
+                        >
+                          <span>{r.emoji}</span>
+                          <span>{r.name}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -551,7 +616,8 @@
 
                 <div className="mt-5 pt-3 border-t border-rose-100 flex items-center justify-between">
                   <span className="text-xs text-slate-500 font-medium">
-                    📝 登記人：<strong className="text-slate-800">{getRoommateObj(currentUser).emoji} {currentUser}</strong>
+                    📝 登記人：<strong className="text-slate-800">{currentRmUserObj.emoji} {currentUser}</strong>
+                    {currentRmUserObj.googleEmail && <span className="text-[10px] text-rose-400 ml-1">({currentRmUserObj.googleEmail})</span>}
                   </span>
                   <button
                     type="submit"
@@ -568,7 +634,7 @@
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
                     <span className="text-xl">🧺</span>
-                    當週採購小記 ({currentWeekExpenses.length} 筆)
+                    當週採購紀錄 ({currentWeekExpenses.length} 筆)
                   </h3>
                   <span className="text-xs bg-rose-100 text-rose-700 font-extrabold px-3 py-1 rounded-full">
                     總共 £{currentWeekExpenses.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}
@@ -590,7 +656,6 @@
                         <div key={exp.id} className="cute-card p-4 rounded-2xl border-2 border-rose-50 bg-rose-50/20 flex items-center justify-between">
                           <div>
                             <div className="flex items-center gap-2">
-                              {/* 類別標籤 */}
                               <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${cat.color}`}>
                                 {cat.emoji} {cat.name}
                               </span>
@@ -606,7 +671,6 @@
                             </div>
                           </div>
 
-                          {/* 僅登記人可刪除按鈕 */}
                           {isMyRecord ? (
                             <button
                               onClick={() => handleDeleteExpense(exp)}
@@ -713,7 +777,7 @@
 
                 {weeklyCalculation.transfers.length === 0 ? (
                   <div className="text-center py-8 text-emerald-600 font-bold text-sm">
-                    🎉 本週帳目完美的平衡，不需要互相轉帳！
+                    🎉 本週帳目完美平衡，不需要互相轉帳！
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -783,6 +847,73 @@
                     })}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Google 帳號綁定 Modal */}
+          {showBindModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-brands fa-google text-red-500"></i>
+                    綁定 Google 帳號身份
+                  </h3>
+                  <button onClick={() => setShowBindModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                {/* 選擇要綁定的室友 */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">選擇你要綁定的室友身份：</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {roommates.map(r => (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => setSelectedBindTarget(r.id)}
+                        className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
+                          selectedBindTarget === r.id
+                            ? 'bg-rose-50 border-rose-500 text-rose-700'
+                            : 'bg-slate-50 border-slate-200 text-slate-600'
+                        }`}
+                      >
+                        <span className="text-lg">{r.emoji}</span>
+                        <span>{r.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1">Google 電子郵件 (Email)：</label>
+                  <input
+                    type="email"
+                    placeholder="your-name@gmail.com"
+                    value={inputGoogleEmail}
+                    onChange={(e) => setInputGoogleEmail(e.target.value)}
+                    className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
+                  />
+                </div>
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={handleConfirmGoogleBind}
+                    className="flex-1 bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
+                  >
+                    確認綁定身份
+                  </button>
+                  {getRoommateObj(selectedBindTarget).googleEmail && (
+                    <button
+                      onClick={() => handleUnbindGoogle(selectedBindTarget)}
+                      className="bg-slate-100 text-slate-600 font-bold px-3 py-2.5 rounded-2xl hover:bg-slate-200 transition text-xs"
+                    >
+                      解除綁定
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
