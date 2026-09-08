@@ -1,1448 +1,663 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-HK">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>室友煮飯採購分攤帳本 - Janice, Carrie, Kingsley</title>
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- React & ReactDOM CDN -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
-    <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <!-- Canvas Confetti -->
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-    
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>室友煮飯採購與結算帳本</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased">
+  <div id="root"></div>
 
-        // Placeholders for standalone exported HTML files
-        const embeddedConfig = /* EMBEDDED_CONFIG_PLACEHOLDER */ null;
-        const embeddedAppId = /* EMBEDDED_APP_ID_PLACEHOLDER */ null;
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
 
-        // Default public fallback Firebase config for hosted deployments (e.g. Netlify / Vercel / GitHub Pages)
-        const publicDefaultConfig = {
-            apiKey: "AIzaSyD-PlaceholderForPublicHost",
-            authDomain: "cook-share-ledger.firebaseapp.com",
-            projectId: "cook-share-ledger",
-            storageBucket: "cook-share-ledger.appspot.com",
-            messagingSenderId: "1234567890",
-            appId: "1:1234567890:web:abcdef123456"
+    const DEFAULT_ROOMMATES = [
+      { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳' },
+      { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾' },
+      { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳' }
+    ];
+
+    // 生成過去 13 週 (約 3 個月) 的週選項
+    function getPast13Weeks() {
+      const weeks = [];
+      const now = new Date();
+      
+      // 計算本週一
+      const day = now.getDay();
+      const diffToMonday = (day === 0 ? -6 : 1) - day;
+      const currentMonday = new Date(now);
+      currentMonday.setDate(now.getDate() + diffToMonday);
+      currentMonday.setHours(0,0,0,0);
+
+      for (let i = 0; i < 13; i++) {
+        const mon = new Date(currentMonday);
+        mon.setDate(currentMonday.getDate() - (i * 7));
+        const sun = new Date(mon);
+        sun.setDate(mon.getDate() + 6);
+
+        const formatDate = (d) => `${d.getMonth()+1}/${d.getDate()}`;
+        const key = mon.toISOString().split('T')[0];
+        const label = i === 0 
+          ? `本週 (${formatDate(mon)} - ${formatDate(sun)})`
+          : `${i} 週前 (${formatDate(mon)} - ${formatDate(sun)})`;
+
+        weeks.push({ key, label, startDate: mon, endDate: sun });
+      }
+      return weeks;
+    }
+
+    function App() {
+      const weeksList = useMemo(() => getPast13Weeks(), []);
+      const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
+      const [activeTab, setActiveTab] = useState('expenses'); // 'expenses', 'dinner', 'settlement'
+      const [currentUser, setCurrentUser] = useState('Kingsley');
+
+      // 資料狀態
+      const [expenses, setExpenses] = useState([]);
+      const [dinnerAbsent, setDinnerAbsent] = useState({}); // { '2026-09-08': ['Janice'] }
+      const [settlements, setSettlements] = useState({}); // { weekKey: [ { id, from, to, amount, payerPaid, receiverConfirmed } ] }
+
+      // 本機與全域雲端儲存同步 (以 cook_ledger_shared_data 為 Key)
+      useEffect(() => {
+        const saved = localStorage.getItem('cook_ledger_shared_data_v2');
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (parsed.expenses) setExpenses(parsed.expenses);
+            if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
+            if (parsed.settlements) setSettlements(parsed.settlements);
+          } catch(e) { console.error(e); }
+        }
+      }, []);
+
+      const saveData = (newExpenses, newDinner, newSettlements) => {
+        const payload = {
+          expenses: newExpenses !== undefined ? newExpenses : expenses,
+          dinnerAbsent: newDinner !== undefined ? newDinner : dinnerAbsent,
+          settlements: newSettlements !== undefined ? newSettlements : settlements
+        };
+        localStorage.setItem('cook_ledger_shared_data_v2', JSON.stringify(payload));
+      };
+
+      // --- 新增採購項目 ---
+      const [itemTitle, setItemTitle] = useState('');
+      const [itemAmount, setItemAmount] = useState('');
+      const [itemPayer, setItemPayer] = useState(currentUser);
+      const [itemDate, setItemDate] = useState(new Date().toISOString().split('T')[0]);
+      const [itemSplit, setItemSplit] = useState(['Janice', 'Carrie', 'Kingsley']);
+      const [registeredBy, setRegisteredBy] = useState(currentUser);
+
+      // 當切換 currentUser 時自動切換預設登記人與付款人
+      useEffect(() => {
+        setItemPayer(currentUser);
+        setRegisteredBy(currentUser);
+      }, [currentUser]);
+
+      // 當選擇日期改變時，檢視當天「不回家吃」的紀錄並提醒
+      useEffect(() => {
+        const absentList = dinnerAbsent[itemDate] || [];
+        if (absentList.length > 0) {
+          setItemSplit(DEFAULT_ROOMMATES.map(r => r.id).filter(id => !absentList.includes(id)));
+        } else {
+          setItemSplit(['Janice', 'Carrie', 'Kingsley']);
+        }
+      }, [itemDate, dinnerAbsent]);
+
+      const handleAddExpense = (e) => {
+        e.preventDefault();
+        if (!itemTitle || !itemAmount || parseFloat(itemAmount) <= 0 || itemSplit.length === 0) {
+          alert('請填寫完整採購名稱、金額並至少選擇一位分攤人！');
+          return;
+        }
+
+        const newEntry = {
+          id: 'exp_' + Date.now(),
+          title: itemTitle,
+          amount: parseFloat(itemAmount),
+          payer: itemPayer,
+          date: itemDate,
+          splitWith: itemSplit,
+          registeredBy: registeredBy || currentUser,
+          createdAt: new Date().toISOString()
         };
 
-        let firebaseConfig = null;
-        try {
-            if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                firebaseConfig = JSON.parse(__firebase_config);
-            } else if (embeddedConfig) {
-                firebaseConfig = embeddedConfig;
-            }
-        } catch(e) {
-            console.error("Config parse error", e);
+        const updated = [newEntry, ...expenses];
+        setExpenses(updated);
+        saveData(updated, undefined, undefined);
+
+        setItemTitle('');
+        setItemAmount('');
+        alert('✅ 採購紀錄已成功新增！');
+      };
+
+      const handleDeleteExpense = (id) => {
+        if (confirm('確定要刪除這筆採購紀錄嗎？')) {
+          const updated = expenses.filter(e => e.id !== id);
+          setExpenses(updated);
+          saveData(updated, undefined, undefined);
         }
+      };
 
-        const appId = typeof __app_id !== 'undefined' && __app_id ? __app_id : (embeddedAppId || 'cook-share-ledger-v1');
-
-        if (firebaseConfig && firebaseConfig.apiKey) {
-            const app = initializeApp(firebaseConfig);
-            const auth = getAuth(app);
-            const db = getFirestore(app);
-
-            window.CloudSync = {
-                app, auth, db, appId, config: firebaseConfig,
-                signInAnonymously, signInWithCustomToken,
-                doc, setDoc, deleteDoc, onSnapshot, collection
-            };
+      // --- 晚餐不回家吃登記 ---
+      const toggleDinnerAbsent = (dateStr, personId) => {
+        const currentList = dinnerAbsent[dateStr] || [];
+        let updatedList = [];
+        if (currentList.includes(personId)) {
+          updatedList = currentList.filter(p => p !== personId);
+        } else {
+          updatedList = [...currentList, personId];
         }
-        window.dispatchEvent(new Event('cloud-sync-ready'));
-    </script>
+        const updatedDinner = { ...dinnerAbsent, [dateStr]: updatedList };
+        setDinnerAbsent(updatedDinner);
+        saveData(undefined, updatedDinner, undefined);
+      };
 
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Plus Jakarta Sans', 'Noto Sans TC', 'sans-serif'],
-                    },
-                    colors: {
-                        brand: {
-                            50: '#f0fdf4',
-                            100: '#dcfce7',
-                            500: '#22c55e',
-                            600: '#16a34a',
-                            700: '#15803d',
-                        }
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        body { font-family: 'Plus Jakarta Sans', 'Noto Sans TC', sans-serif; }
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #f1f5f9;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #cbd5e1;
-            border-radius: 9999px;
-        }
-    </style>
-</head>
-<body class="bg-slate-50 text-slate-800 min-h-screen pb-12">
+      // --- 篩選當週採購 ---
+      const currentWeekObj = useMemo(() => {
+        return weeksList.find(w => w.key === selectedWeekKey) || weeksList[0];
+      }, [selectedWeekKey, weeksList]);
 
-    <div id="root"></div>
+      const currentWeekExpenses = useMemo(() => {
+        const start = new Date(currentWeekObj.startDate);
+        const end = new Date(currentWeekObj.endDate);
+        end.setHours(23, 59, 59, 999);
 
-    <script type="text/babel">
-        const ROOMMATES_DEFAULT = [
-            { id: 'Janice', name: 'Janice', avatar: '👩‍🍳', color: 'bg-rose-100 text-rose-700 border-rose-200' },
-            { id: 'Carrie', name: 'Carrie', avatar: '👩‍🌾', color: 'bg-amber-100 text-amber-700 border-amber-200' },
-            { id: 'Kingsley', name: 'Kingsley', avatar: '👨‍🍳', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' }
-        ];
+        return expenses.filter(exp => {
+          const d = new Date(exp.date);
+          return d >= start && d <= end;
+        });
+      }, [expenses, currentWeekObj]);
 
-        const EMOJI_PRESETS = [
-            '👩‍🍳', '👨‍🍳', '👩‍🌾', '👨‍🌾', '🥑', '🥩', '🍣', '🍕', '🥗', '🍔', 
-            '🥟', '🍜', '🍰', '☕', '🐱', '🐶', '🦊', '🐼', '🦁', '👑', 
-            '🌟', '🌶️', '🍱', '🍻'
-        ];
+      // --- 計算本週結算金額 ---
+      const weeklyCalculation = useMemo(() => {
+        const paidMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
+        const oweMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
 
-        const CATEGORIES = [
-            { id: 'veggies', name: '蔬菜水果', emoji: '🥬' },
-            { id: 'meat', name: '肉類海鮮', emoji: '🥩' },
-            { id: 'seasoning', name: '調味料/油', emoji: '🧂' },
-            { id: 'dry', name: '乾糧麵米', emoji: '🍚' },
-            { id: 'snacks', name: '零食飲料', emoji: '🥤' },
-            { id: 'other', name: '其他雜項', emoji: '🛒' }
-        ];
+        currentWeekExpenses.forEach(exp => {
+          paidMap[exp.payer] += exp.amount;
+          const share = exp.amount / exp.splitWith.length;
+          exp.splitWith.forEach(person => {
+            oweMap[person] += share;
+          });
+        });
 
-        // Helper: Get ISO Week string like "2026-W37" and Start/End Dates
-        function getWeekInfo(dateInput) {
-            const date = new Date(dateInput);
-            date.setHours(0, 0, 0, 0);
-            
-            // Thursday in current week decides the year.
-            date.setDate(date.getDate() + 3 - (date.getDay() + 6) % 7);
-            const week1 = new Date(date.getFullYear(), 0, 4);
-            const weekNum = Math.round(((date.getTime() - week1.getTime()) / 86400000 - 3 + (week1.getDay() + 6) % 7) / 7) + 1;
-            
-            const year = date.getFullYear();
-            const weekKey = `${year}-W${weekNum < 10 ? '0' + weekNum : weekNum}`;
+        const netMap = {
+          Janice: paidMap.Janice - oweMap.Janice,
+          Carrie: paidMap.Carrie - oweMap.Carrie,
+          Kingsley: paidMap.Kingsley - oweMap.Kingsley
+        };
 
-            // Calculate start (Monday) and end (Sunday) of week
-            const current = new Date(dateInput);
-            const day = current.getDay();
-            const diffToMon = current.getDate() - day + (day === 0 ? -6 : 1);
-            
-            const monday = new Date(current.setDate(diffToMon));
-            const sunday = new Date(monday);
-            sunday.setDate(monday.getDate() + 6);
+        // 計算最佳轉帳方案 (誰給誰多少錢)
+        const creditors = []; // 應收款 (+)
+        const debtors = [];   // 應付款 (-)
 
-            const formatDate = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
-            const label = `${weekKey} (${formatDate(monday)} ~ ${formatDate(sunday)})`;
+        Object.keys(netMap).forEach(person => {
+          const val = Math.round(netMap[person] * 100) / 100;
+          if (val > 0.01) creditors.push({ person, amount: val });
+          else if (val < -0.01) debtors.push({ person, amount: -val });
+        });
 
-            return { weekKey, label, monday, sunday };
-        }
-
-        function getDatesOfWeek(weekKey) {
-            if (!weekKey) return [];
-            const parts = weekKey.split('-W');
-            if (parts.length < 2) return [];
-            const year = parseInt(parts[0], 10);
-            const week = parseInt(parts[1], 10);
-
-            const jan4 = new Date(year, 0, 4);
-            const dayOfWeek = jan4.getDay() || 7;
-            const mon1 = new Date(jan4);
-            mon1.setDate(jan4.getDate() - dayOfWeek + 1);
-
-            const targetMon = new Date(mon1);
-            targetMon.setDate(mon1.getDate() + (week - 1) * 7);
-
-            const days = [];
-            const dayNames = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'];
-            const todayIso = new Date().toISOString().split('T')[0];
-
-            for (let i = 0; i < 7; i++) {
-                const d = new Date(targetMon);
-                d.setDate(targetMon.getDate() + i);
-                const isoStr = d.toISOString().split('T')[0];
-                const dateLabel = `${d.getMonth() + 1}/${d.getDate()}`;
-                days.push({ 
-                    dateStr: isoStr, 
-                    label: dateLabel, 
-                    dayName: dayNames[i], 
-                    isToday: isoStr === todayIso 
-                });
-            }
-            return days;
-        }
-
-        // Get initial current week key
-        const CURRENT_WEEK_KEY = getWeekInfo(new Date()).weekKey;
-
-        // Default initial expenses cleared to start fresh from today
-        const INITIAL_EXPENSES = [];
-
-        function App() {
-            const [roommates, setRoommates] = React.useState(() => {
-                const saved = localStorage.getItem('cook_roommates_v2');
-                return saved ? JSON.parse(saved) : ROOMMATES_DEFAULT;
+        const transfers = [];
+        let i = 0, j = 0;
+        while (i < debtors.length && j < creditors.length) {
+          const pay = Math.min(debtors[i].amount, creditors[j].amount);
+          if (pay > 0.009) {
+            transfers.push({
+              id: `tr_${debtors[i].person}_${creditors[j].person}_${pay.toFixed(2)}`,
+              from: debtors[i].person,
+              to: creditors[j].person,
+              amount: parseFloat(pay.toFixed(2))
             });
-
-            // Ledger Code state for cross-device & external room sync
-            const [ledgerCode, setLedgerCode] = React.useState(() => {
-                const urlParams = new URLSearchParams(window.location.search);
-                const codeFromUrl = urlParams.get('code');
-                if (codeFromUrl) return codeFromUrl.trim();
-                const saved = localStorage.getItem('cook_ledger_code_v1');
-                return saved ? saved : 'cook-flat-888';
-            });
-
-            const [showShareModal, setShowShareModal] = React.useState(false);
-            const [inputLedgerCode, setInputLedgerCode] = React.useState('');
-
-            const [dinnersOut, setDinnersOut] = React.useState(() => {
-                const saved = localStorage.getItem('cook_dinners_out_v1');
-                return saved ? JSON.parse(saved) : {};
-            });
-
-            const [expenses, setExpenses] = React.useState(() => {
-                const saved = localStorage.getItem('cook_expenses_v1');
-                return saved ? JSON.parse(saved) : INITIAL_EXPENSES;
-            });
-
-            const [settledWeeks, setSettledWeeks] = React.useState(() => {
-                const saved = localStorage.getItem('cook_settled_weeks_v1');
-                return saved ? JSON.parse(saved) : [];
-            });
-
-            const [syncStatus, setSyncStatus] = React.useState('connecting'); // 'connecting', 'connected', 'offline'
-            const [selectedWeek, setSelectedWeek] = React.useState(CURRENT_WEEK_KEY);
-            const [activeTab, setActiveTab] = React.useState('dashboard'); // 'dashboard', 'add', 'dinners', 'list'
-            const [toast, setToast] = React.useState(null);
-            const [confirmDeleteId, setConfirmDeleteId] = React.useState(null);
-            const [showResetConfirm, setShowResetConfirm] = React.useState(false);
-            
-            const [importInput, setImportInput] = React.useState('');
-            const [showImportBox, setShowImportBox] = React.useState(false);
-
-            // Custom Avatar Modal State
-            const [showAvatarModal, setShowAvatarModal] = React.useState(false);
-            const [editingRoommateId, setEditingRoommateId] = React.useState('Janice');
-            const [customEmojiInput, setCustomEmojiInput] = React.useState('');
-
-            // Form State
-            const [title, setTitle] = React.useState('');
-            const [amount, setAmount] = React.useState('');
-            const [payer, setPayer] = React.useState('Janice');
-            const [participants, setParticipants] = React.useState(['Janice', 'Carrie', 'Kingsley']);
-            const [date, setDate] = React.useState(new Date().toISOString().split('T')[0]);
-            const [category, setCategory] = React.useState('veggies');
-            const [note, setNote] = React.useState('');
-            const [autoExcludedNote, setAutoExcludedNote] = React.useState('');
-
-            React.useEffect(() => {
-                let unsubExp = null, unsubDin = null, unsubSet = null, unsubRm = null;
-
-                const initSync = async () => {
-                    if (!window.CloudSync) {
-                        setSyncStatus('offline');
-                        return;
-                    }
-                    const { auth, db, appId, signInAnonymously, signInWithCustomToken, doc, setDoc, onSnapshot, collection } = window.CloudSync;
-
-                    try {
-                        let user = null;
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            try {
-                                const cred = await signInWithCustomToken(auth, __initial_auth_token);
-                                user = cred.user;
-                            } catch(e) {
-                                const cred = await signInAnonymously(auth);
-                                user = cred.user;
-                            }
-                        } else {
-                            const cred = await signInAnonymously(auth);
-                            user = cred.user;
-                        }
-
-                        if (!user) {
-                            setSyncStatus('offline');
-                            return;
-                        }
-                        setSyncStatus('connected');
-
-                        // 1. Listen to Expenses (filtered by ledgerCode)
-                        const expCol = collection(db, 'artifacts', appId, 'public', 'data', 'expenses');
-                        unsubExp = onSnapshot(expCol, (snapshot) => {
-                            const list = [];
-                            snapshot.forEach(d => {
-                                const data = d.data();
-                                if (!data.ledgerCode || data.ledgerCode === ledgerCode) {
-                                    list.push(data);
-                                }
-                            });
-                            setExpenses(list.sort((a, b) => new Date(b.date) - new Date(a.date)));
-                        }, (err) => console.error("Exp sync err:", err));
-
-                        // 2. Listen to Dinners (filtered by ledgerCode)
-                        const dinCol = collection(db, 'artifacts', appId, 'public', 'data', 'dinners');
-                        unsubDin = onSnapshot(dinCol, (snapshot) => {
-                            const map = {};
-                            snapshot.forEach(d => {
-                                const data = d.data();
-                                if (!data.ledgerCode || data.ledgerCode === ledgerCode) {
-                                    map[d.id] = data;
-                                }
-                            });
-                            setDinnersOut(map);
-                        }, (err) => console.error("Din sync err:", err));
-
-                        // 3. Listen to Settled Weeks
-                        const setCol = collection(db, 'artifacts', appId, 'public', 'data', 'settledWeeks');
-                        unsubSet = onSnapshot(setCol, (snapshot) => {
-                            const weeks = [];
-                            snapshot.forEach(d => {
-                                const data = d.data();
-                                if ((!data.ledgerCode || data.ledgerCode === ledgerCode) && data.settled) {
-                                    weeks.push(d.id.replace(`${ledgerCode}_`, ''));
-                                }
-                            });
-                            setSettledWeeks(weeks);
-                        }, (err) => console.error("Set sync err:", err));
-
-                        // 4. Listen to Roommates
-                        const rmCol = collection(db, 'artifacts', appId, 'public', 'data', 'roommates');
-                        unsubRm = onSnapshot(rmCol, (snapshot) => {
-                            const list = [];
-                            snapshot.forEach(d => list.push(d.data()));
-                            if (list.length > 0) {
-                                setRoommates(list);
-                            } else {
-                                ROOMMATES_DEFAULT.forEach(r => {
-                                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'roommates', r.id), r);
-                                });
-                            }
-                        }, (err) => console.error("Rm sync err:", err));
-
-                    } catch(err) {
-                        console.error("Cloud init err:", err);
-                        setSyncStatus('offline');
-                    }
-                };
-
-                if (window.CloudSync) {
-                    initSync();
-                } else {
-                    window.addEventListener('cloud-sync-ready', initSync);
-                }
-
-                return () => {
-                    if (unsubExp) unsubExp();
-                    if (unsubDin) unsubDin();
-                    if (unsubSet) unsubSet();
-                    if (unsubRm) unsubRm();
-                    window.removeEventListener('cloud-sync-ready', initSync);
-                };
-            }, [ledgerCode]);
-
-            // LocalStorage fallbacks
-            React.useEffect(() => {
-                localStorage.setItem('cook_roommates_v2', JSON.stringify(roommates));
-            }, [roommates]);
-
-            React.useEffect(() => {
-                localStorage.setItem('cook_dinners_out_v1', JSON.stringify(dinnersOut));
-            }, [dinnersOut]);
-
-            React.useEffect(() => {
-                localStorage.setItem('cook_expenses_v1', JSON.stringify(expenses));
-            }, [expenses]);
-
-            React.useEffect(() => {
-                localStorage.setItem('cook_settled_weeks_v1', JSON.stringify(settledWeeks));
-            }, [settledWeeks]);
-
-            React.useEffect(() => {
-                localStorage.setItem('cook_ledger_code_v1', ledgerCode);
-            }, [ledgerCode]);
-
-            const handleJoinLedger = (newCode) => {
-                if (!newCode || !newCode.trim()) return;
-                const cleanCode = newCode.trim();
-                setLedgerCode(cleanCode);
-                setShowShareModal(false);
-                showToast(`🔄 已成功切換至帳本房間：${cleanCode}`);
-            };
-
-            const handleCopyShareLink = () => {
-                let url = window.location.href.split('?')[0];
-                const shareUrl = `${url}?code=${encodeURIComponent(ledgerCode)}`;
-                
-                const textarea = document.createElement('textarea');
-                textarea.value = shareUrl;
-                document.body.appendChild(textarea);
-                textarea.select();
-                try {
-                    document.execCommand('copy');
-                    showToast('🔗 已複製專屬帳本分享連結！發送給室友即可同步');
-                } catch (e) {
-                    showToast('複製失敗');
-                }
-                document.body.removeChild(textarea);
-            };
-
-            const handleCopyCodeOnly = () => {
-                const textarea = document.createElement('textarea');
-                textarea.value = ledgerCode;
-                document.body.appendChild(textarea);
-                textarea.select();
-                try {
-                    document.execCommand('copy');
-                    showToast('🔑 已複製帳本房間代碼！');
-                } catch (e) {
-                    showToast('複製失敗');
-                }
-                document.body.removeChild(textarea);
-            };
-
-            // Download self-contained single .html app file for roommates with baked-in cloud credentials
-            const handleDownloadHtml = () => {
-                try {
-                    let currentCfg = null;
-                    try {
-                        if (typeof __firebase_config !== 'undefined' && __firebase_config) {
-                            currentCfg = JSON.parse(__firebase_config);
-                        } else if (window.CloudSync && window.CloudSync.config) {
-                            currentCfg = window.CloudSync.config;
-                        }
-                    } catch(e) {}
-
-                    const currentAppId = typeof __app_id !== 'undefined' && __app_id ? __app_id : (window.CloudSync?.appId || 'cook-share-ledger-v1');
-
-                    let htmlContent = document.documentElement.outerHTML;
-
-                    // Embed active credentials into exported HTML so roommates get instant Firebase connection
-                    if (currentCfg) {
-                        htmlContent = htmlContent.replace('/* EMBEDDED_CONFIG_PLACEHOLDER */ null', JSON.stringify(currentCfg));
-                    }
-                    if (currentAppId) {
-                        htmlContent = htmlContent.replace('/* EMBEDDED_APP_ID_PLACEHOLDER */ null', JSON.stringify(currentAppId));
-                    }
-
-                    const blob = new Blob(['<!DOCTYPE html>\n' + htmlContent], { type: 'text/html;charset=utf-8;' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `室友煮飯帳本_${ledgerCode}.html`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    showToast('📥 已成功匯出包含雲端同步密鑰的網頁檔！傳給室友即可跨裝置同步');
-                } catch (e) {
-                    showToast('⚠️ 下載失敗，請重試');
-                }
-            };
-
-            // Export JSON backup data
-            const handleExportData = () => {
-                const data = { expenses, dinnersOut, settledWeeks, roommates, ledgerCode, exportedAt: new Date().toISOString() };
-                const jsonStr = JSON.stringify(data, null, 2);
-                const textarea = document.createElement('textarea');
-                textarea.value = jsonStr;
-                document.body.appendChild(textarea);
-                textarea.select();
-                try {
-                    document.execCommand('copy');
-                    showToast('📋 已複製 JSON 備份文字！可發送給室友進行匯入');
-                } catch (err) {
-                    showToast('複製失敗');
-                }
-                document.body.removeChild(textarea);
-            };
-
-            // Import JSON backup data
-            const handleImportData = () => {
-                if (!importInput.trim()) return;
-                try {
-                    const data = JSON.parse(importInput.trim());
-                    if (data.expenses && Array.isArray(data.expenses)) setExpenses(data.expenses);
-                    if (data.dinnersOut && typeof data.dinnersOut === 'object') setDinnersOut(data.dinnersOut);
-                    if (data.settledWeeks && Array.isArray(data.settledWeeks)) setSettledWeeks(data.settledWeeks);
-                    if (data.roommates && Array.isArray(data.roommates)) setRoommates(data.roommates);
-                    if (data.ledgerCode) setLedgerCode(data.ledgerCode);
-                    setShowImportBox(false);
-                    setImportInput('');
-                    showToast('🎉 資料已成功匯入與更新！');
-                } catch (e) {
-                    showToast('⚠️ 貼上的資料格式不符合，請確認為正確的 JSON 文字');
-                }
-            };
-
-            // Reset all expenses and records to start fresh
-            const handleResetAll = () => {
-                if (window.CloudSync) {
-                    const { db, appId, doc, deleteDoc } = window.CloudSync;
-                    expenses.forEach(exp => {
-                        if (!exp.ledgerCode || exp.ledgerCode === ledgerCode) {
-                            deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', exp.id));
-                        }
-                    });
-                    Object.keys(dinnersOut).forEach(key => {
-                        deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dinners', key));
-                    });
-                    settledWeeks.forEach(w => {
-                        deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settledWeeks', `${ledgerCode}_${w}`));
-                    });
-                }
-
-                setExpenses([]);
-                setDinnersOut({});
-                setSettledWeeks([]);
-                localStorage.removeItem('cook_expenses_v1');
-                localStorage.removeItem('cook_dinners_out_v1');
-                localStorage.removeItem('cook_settled_weeks_v1');
-
-                setShowResetConfirm(false);
-                showToast('🧹 帳本資料已全面清零，今天開始重新計算！');
-            };
-
-            React.useEffect(() => {
-                if (!date) return;
-                const outPeopleNames = roommates
-                    .filter(r => dinnersOut[`${date}_${r.id}`]?.out)
-                    .map(r => r.name);
-
-                const homePeopleIds = roommates
-                    .filter(r => !dinnersOut[`${date}_${r.id}`]?.out)
-                    .map(r => r.id);
-
-                if (outPeopleNames.length > 0) {
-                    setParticipants(homePeopleIds.length > 0 ? homePeopleIds : roommates.map(r => r.id));
-                    setAutoExcludedNote(`💡 ${outPeopleNames.join(', ')} 登記當日不回家吃晚餐，已自動排除分攤`);
-                } else {
-                    setAutoExcludedNote('');
-                }
-            }, [date, dinnersOut, roommates]);
-
-            // Show temporary toast message
-            const showToast = (msg) => {
-                setToast(msg);
-                setTimeout(() => setToast(null), 3000);
-            };
-
-            // Toggle roommate dinner status
-            const toggleDinnerOut = (dateStr, personId) => {
-                const key = `${dateStr}_${personId}`;
-                const current = dinnersOut[key];
-                
-                if (current && current.out) {
-                    const next = { ...dinnersOut };
-                    delete next[key];
-                    setDinnersOut(next);
-                    if (window.CloudSync) {
-                        const { db, appId, doc, deleteDoc } = window.CloudSync;
-                        deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dinners', key));
-                    }
-                    showToast(`🍽️ 已標記該日在家用餐`);
-                } else {
-                    const payload = { out: true, note: '不回吃', ledgerCode };
-                    setDinnersOut({ ...dinnersOut, [key]: payload });
-                    if (window.CloudSync) {
-                        const { db, appId, doc, setDoc } = window.CloudSync;
-                        setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dinners', key), payload);
-                    }
-                    showToast(`❌ 已標記為不回吃晚餐`);
-                }
-            };
-
-            // Update roommate note for dinner absence
-            const setDinnerNote = (dateStr, personId, noteVal) => {
-                const key = `${dateStr}_${personId}`;
-                const payload = { out: true, note: noteVal, ledgerCode };
-                setDinnersOut({ ...dinnersOut, [key]: payload });
-                if (window.CloudSync) {
-                    const { db, appId, doc, setDoc } = window.CloudSync;
-                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dinners', key), payload);
-                }
-            };
-
-            // Update roommate avatar emoji
-            const handleSelectEmoji = (personId, emoji) => {
-                const updated = roommates.map(r => r.id === personId ? { ...r, avatar: emoji } : r);
-                setRoommates(updated);
-                if (window.CloudSync) {
-                    const { db, appId, doc, setDoc } = window.CloudSync;
-                    const target = updated.find(r => r.id === personId);
-                    if (target) {
-                        setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'roommates', personId), target);
-                    }
-                }
-                showToast(`✨ 已更新 ${personId} 的專屬 Emoji 圖案！`);
-            };
-
-            // Get list of available week keys
-            const availableWeeks = React.useMemo(() => {
-                const weeksSet = new Set(expenses.map(e => e.weekKey));
-                weeksSet.add(CURRENT_WEEK_KEY);
-                return Array.from(weeksSet).sort().reverse();
-            }, [expenses]);
-
-            // Filter expenses for selected week
-            const weeklyExpenses = React.useMemo(() => {
-                return expenses.filter(e => e.weekKey === selectedWeek);
-            }, [expenses, selectedWeek]);
-
-            // Calculate Balance for Selected Week
-            const summary = React.useMemo(() => {
-                let totalSpent = 0;
-                const paidMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
-                const shareMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
-
-                weeklyExpenses.forEach(exp => {
-                    const amt = parseFloat(exp.amount) || 0;
-                    totalSpent += amt;
-
-                    if (paidMap[exp.payer] !== undefined) {
-                        paidMap[exp.payer] += amt;
-                    }
-
-                    if (exp.participants && exp.participants.length > 0) {
-                        const perPerson = amt / exp.participants.length;
-                        exp.participants.forEach(p => {
-                            if (shareMap[p] !== undefined) {
-                                shareMap[p] += perPerson;
-                            }
-                        });
-                    }
-                });
-
-                const netMap = {
-                    Janice: paidMap.Janice - shareMap.Janice,
-                    Carrie: paidMap.Carrie - shareMap.Carrie,
-                    Kingsley: paidMap.Kingsley - shareMap.Kingsley,
-                };
-
-                const debtors = [];
-                const creditors = [];
-
-                Object.keys(netMap).forEach(person => {
-                    const val = netMap[person];
-                    if (val < -0.01) {
-                        debtors.push({ name: person, amount: Math.abs(val) });
-                    } else if (val > 0.01) {
-                        creditors.push({ name: person, amount: val });
-                    }
-                });
-
-                const transfers = [];
-                let i = 0, j = 0;
-
-                while (i < debtors.length && j < creditors.length) {
-                    const debt = debtors[i].amount;
-                    const cred = creditors[j].amount;
-                    const settledAmt = Math.min(debt, cred);
-
-                    transfers.push({
-                        from: debtors[i].name,
-                        to: creditors[j].name,
-                        amount: Math.round(settledAmt * 100) / 100
-                    });
-
-                    debtors[i].amount -= settledAmt;
-                    creditors[j].amount -= settledAmt;
-
-                    if (debtors[i].amount < 0.01) i++;
-                    if (creditors[j].amount < 0.01) j++;
-                }
-
-                return { totalSpent, paidMap, shareMap, netMap, transfers };
-            }, [weeklyExpenses]);
-
-            // Add Expense Handler
-            const handleAddExpense = (e) => {
-                e.preventDefault();
-                if (!title.trim() || !amount || parseFloat(amount) <= 0) {
-                    showToast('⚠️ 請填寫正確的項目名稱與金額！');
-                    return;
-                }
-                if (participants.length === 0) {
-                    showToast('⚠️ 請至少選擇一位分攤成員！');
-                    return;
-                }
-
-                const { weekKey } = getWeekInfo(date);
-
-                const newExp = {
-                    id: 'exp-' + Date.now(),
-                    title: title.trim(),
-                    amount: parseFloat(amount),
-                    payer,
-                    participants,
-                    date,
-                    category,
-                    weekKey,
-                    note: note.trim(),
-                    ledgerCode
-                };
-
-                setExpenses([newExp, ...expenses]);
-                if (window.CloudSync) {
-                    const { db, appId, doc, setDoc } = window.CloudSync;
-                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', newExp.id), newExp);
-                }
-
-                setSelectedWeek(weekKey);
-                
-                setTitle('');
-                setAmount('');
-                setNote('');
-                setActiveTab('dashboard');
-                showToast('✅ 成功新增一筆採購紀錄！');
-            };
-
-            const toggleParticipant = (personId) => {
-                if (participants.includes(personId)) {
-                    if (participants.length === 1) {
-                        showToast('至少需要一位成員分攤');
-                        return;
-                    }
-                    setParticipants(participants.filter(p => p !== personId));
-                } else {
-                    setParticipants([...participants, personId]);
-                }
-            };
-
-            const handleDelete = (id) => {
-                setExpenses(expenses.filter(e => e.id !== id));
-                if (window.CloudSync) {
-                    const { db, appId, doc, deleteDoc } = window.CloudSync;
-                    deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'expenses', id));
-                }
-                setConfirmDeleteId(null);
-                showToast('🗑️ 已刪除該筆採購紀錄');
-            };
-
-            const toggleSettleWeek = (weekKey) => {
-                const isSettled = settledWeeks.includes(weekKey);
-                const docId = `${ledgerCode}_${weekKey}`;
-                if (isSettled) {
-                    setSettledWeeks(settledWeeks.filter(w => w !== weekKey));
-                    if (window.CloudSync) {
-                        const { db, appId, doc, deleteDoc } = window.CloudSync;
-                        deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settledWeeks', docId));
-                    }
-                    showToast('已取消該週的結算標記');
-                } else {
-                    setSettledWeeks([...settledWeeks, weekKey]);
-                    if (window.CloudSync) {
-                        const { db, appId, doc, setDoc } = window.CloudSync;
-                        setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settledWeeks', docId), { settled: true, ledgerCode });
-                    }
-                    confetti({
-                        particleCount: 80,
-                        spread: 60,
-                        origin: { y: 0.6 }
-                    });
-                    showToast('🎉 本週費用已成功結算付清！');
-                }
-            };
-
-            const isCurrentWeekSettled = settledWeeks.includes(selectedWeek);
-            const weekDays = getDatesOfWeek(selectedWeek);
-
-            return (
-                <div className="max-w-2xl mx-auto px-4 pt-6 pb-20">
-                    
-                    <header className="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-700 text-white p-6 rounded-3xl shadow-lg mb-6 relative overflow-hidden">
-                        <div className="absolute right-0 top-0 opacity-10 transform translate-x-4 -translate-y-4">
-                            <span className="text-9xl">🍳</span>
-                        </div>
-                        <div className="relative z-10 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                            <div>
-                                <div className="flex items-center gap-2 mb-1 text-emerald-200 text-sm font-medium flex-wrap">
-                                    <span>🏠 共享廚房 · 採購自動結算帳本</span>
-                                    <span className="bg-white/20 text-white border border-white/30 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-semibold font-mono">
-                                        🔑 代碼: {ledgerCode}
-                                    </span>
-                                    {syncStatus === 'connected' && (
-                                        <span className="bg-emerald-500/30 text-emerald-100 border border-emerald-400/30 text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1 font-semibold">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse"></span>
-                                            即時同步中
-                                        </span>
-                                    )}
-                                </div>
-                                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight mb-2 flex items-center gap-2">
-                                    {roommates.map(r => (
-                                        <span key={r.id} className="inline-flex items-center gap-1 bg-white/10 px-2.5 py-0.5 rounded-full text-base">
-                                            <span>{r.avatar}</span>
-                                            <span className="text-sm font-semibold">{r.name}</span>
-                                        </span>
-                                    ))}
-                                </h1>
-                                <p className="text-xs sm:text-sm text-emerald-100/90 leading-relaxed max-w-md">
-                                    輕鬆記錄買菜與材料費用，支援晚飯不吃登記與跨裝置同步結算。
-                                </p>
-                            </div>
-
-                            <div className="flex sm:flex-col gap-2 shrink-0">
-                                <button 
-                                    onClick={() => {
-                                        setInputLedgerCode(ledgerCode);
-                                        setShowShareModal(true);
-                                    }}
-                                    className="bg-white text-emerald-800 hover:bg-emerald-50 text-xs font-bold px-3 py-2 rounded-xl shadow-sm transition flex items-center justify-center gap-1.5"
-                                >
-                                    <span>🔗 共享/邀請室友</span>
-                                </button>
-                                <button 
-                                    onClick={() => setShowAvatarModal(true)}
-                                    className="bg-white/20 hover:bg-white/30 text-white text-xs font-semibold px-3 py-2 rounded-xl backdrop-blur-sm transition flex items-center justify-center gap-1.5 border border-white/20"
-                                >
-                                    <span>⚙️ 自訂 Emoji</span>
-                                </button>
-                                <button 
-                                    onClick={() => setShowResetConfirm(true)}
-                                    className="bg-rose-500/80 hover:bg-rose-600 text-white text-xs font-semibold px-3 py-2 rounded-xl backdrop-blur-sm transition flex items-center justify-center gap-1.5 border border-rose-400/30"
-                                >
-                                    <span>🧹 清空重算</span>
-                                </button>
-                            </div>
-                        </div>
-                    </header>
-
-                    {/* Share / Ledger Room Code Modal */}
-                    {showShareModal && (
-                        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-                            <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in duration-200">
-                                <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-3">
-                                    <h3 className="font-bold text-slate-800 text-base flex items-center gap-2">
-                                        <span>📲 共享帳本與傳送給室友</span>
-                                    </h3>
-                                    <button 
-                                        onClick={() => setShowShareModal(false)}
-                                        className="text-slate-400 hover:text-slate-600 text-lg font-bold"
-                                    >
-                                        ✕
-                                    </button>
-                                </div>
-
-                                {/* Sandbox Notice Banner */}
-                                <div className="bg-amber-50 border border-amber-200/90 rounded-2xl p-3.5 mb-4 text-xs text-amber-900 leading-relaxed">
-                                    <div className="font-bold mb-1 flex items-center gap-1 text-amber-800">
-                                        <span>⚠️ 為什麼直接傳連結室友打不開？</span>
-                                    </div>
-                                    <p className="text-[11px] text-amber-800/90">
-                                        因為目前的預覽網址屬於個人的安全沙盒環境。**建議使用下方「方式 1」下載網頁檔傳給室友**，開啟後依然能透過雲端「房間代碼」即時連線同步！
-                                    </p>
-                                </div>
-
-                                <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 mb-4 text-center">
-                                    <div className="text-xs font-semibold text-emerald-800 mb-1">你們共同的「雲端房間代碼」</div>
-                                    <div className="text-2xl font-black text-emerald-700 tracking-wider my-1 font-mono">{ledgerCode}</div>
-                                    <p className="text-[11px] text-emerald-600 leading-relaxed mt-1">
-                                        只要房間代碼相同，任何裝置開啟本帳本皆會自動同步資料！
-                                    </p>
-                                </div>
-
-                                <div className="space-y-2.5 mb-5">
-                                    <div className="text-xs font-bold text-slate-700">👉 方式 1：發布到免費網路空間（最推薦室友使用）</div>
-                                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-[11px] text-slate-600 leading-relaxed space-y-1">
-                                        <p>🌐 只要將此 `.html` 上傳至 <strong>Netlify Drop</strong> 或 <strong>GitHub Pages</strong>，即可產生專屬網址 <code>https://...</code>！</p>
-                                        <p>📱 室友在 LINE / Safari 點開網址後，點擊「加入主畫面」即可像 App 一樣使用與即時同步！</p>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={handleDownloadHtml}
-                                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-xs transition flex items-center justify-center gap-2 shadow-sm"
-                                    >
-                                        <span>📥 下載網頁原始碼檔 (.html)</span>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Custom Avatar Modal */}
-                    {showAvatarModal && (
-                        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-                            <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-100 animate-in fade-in zoom-in duration-200">
-                                <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-3">
-                                    <h3 className="font-bold text-slate-800 text-base flex items-center gap-2">
-                                        <span>🎨 自訂室友 Emoji 頭像</span>
-                                    </h3>
-                                    <button 
-                                        onClick={() => setShowAvatarModal(false)}
-                                        className="text-slate-400 hover:text-slate-600 text-lg font-bold"
-                                    >
-                                        ✕
-                                    </button>
-                                </div>
-
-                                <div className="mb-4">
-                                    <label className="block text-xs font-semibold text-slate-500 mb-2">選擇要修改的室友：</label>
-                                    <div className="grid grid-cols-3 gap-2">
-                                        {roommates.map(r => (
-                                            <button
-                                                key={r.id}
-                                                type="button"
-                                                onClick={() => setEditingRoommateId(r.id)}
-                                                className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition ${editingRoommateId === r.id ? 'bg-emerald-50 border-emerald-500 text-emerald-700 shadow-sm' : 'border-slate-200 bg-slate-50 text-slate-600'}`}
-                                            >
-                                                <span className="text-lg">{r.avatar}</span>
-                                                <span>{r.name}</span>
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div className="mb-4">
-                                    <label className="block text-xs font-semibold text-slate-500 mb-2">點擊挑選專屬 Emoji：</label>
-                                    <div className="grid grid-cols-6 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-200 max-h-48 overflow-y-auto">
-                                        {EMOJI_PRESETS.map(emoji => (
-                                            <button
-                                                key={emoji}
-                                                type="button"
-                                                onClick={() => handleSelectEmoji(editingRoommateId, emoji)}
-                                                className="h-10 text-2xl hover:bg-white rounded-xl transition flex items-center justify-center border border-transparent hover:border-slate-200 shadow-none hover:shadow-sm"
-                                            >
-                                                {emoji}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div className="mb-6">
-                                    <label className="block text-xs font-semibold text-slate-500 mb-1.5">或自行輸入任意 Emoji：</label>
-                                    <div className="flex gap-2">
-                                        <input 
-                                            type="text" 
-                                            placeholder="例如: 🍕, 🚀, 🐱"
-                                            value={customEmojiInput}
-                                            onChange={(e) => setCustomEmojiInput(e.target.value)}
-                                            className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                        />
-                                        <button 
-                                            type="button"
-                                            onClick={() => {
-                                                if (customEmojiInput.trim()) {
-                                                    handleSelectEmoji(editingRoommateId, customEmojiInput.trim());
-                                                    setCustomEmojiInput('');
-                                                }
-                                            }}
-                                            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-bold transition"
-                                        >
-                                            套用
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <button 
-                                    onClick={() => setShowAvatarModal(false)}
-                                    className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl text-xs transition"
-                                >
-                                    完成設定
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Toast Notification */}
-                    {toast && (
-                        <div className="fixed top-5 left-1/2 transform -translate-x-1/2 z-50 bg-slate-800 text-white px-5 py-2.5 rounded-full shadow-2xl text-sm font-medium flex items-center gap-2 border border-slate-700 animate-bounce">
-                            <span>{toast}</span>
-                        </div>
-                    )}
-
-                    {/* Week Picker Navigation */}
-                    <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200/80 mb-6 flex flex-col sm:flex-row items-center justify-between gap-3">
-                        <div className="flex items-center gap-2 w-full sm:w-auto">
-                            <span className="text-slate-400 font-medium text-xs sm:text-sm">🗓️ 選擇週數:</span>
-                            <select 
-                                value={selectedWeek} 
-                                onChange={(e) => setSelectedWeek(e.target.value)}
-                                className="bg-slate-50 font-semibold text-slate-700 border border-slate-200 rounded-xl px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 flex-1 sm:flex-initial"
-                            >
-                                {availableWeeks.map(w => (
-                                    <option key={w} value={w}>
-                                        {w} {w === CURRENT_WEEK_KEY ? '(本週)' : ''}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-
-                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                            {isCurrentWeekSettled ? (
-                                <button 
-                                    onClick={() => toggleSettleWeek(selectedWeek)}
-                                    className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5"
-                                >
-                                    <span>✅ 本週已結算</span>
-                                    <span className="text-emerald-400 text-[10px]"> (點擊取消)</span>
-                                </button>
-                            ) : (
-                                <button 
-                                    onClick={() => toggleSettleWeek(selectedWeek)}
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-xl text-xs font-semibold shadow-sm transition flex items-center gap-1"
-                                >
-                                    <span>💰 標記為整週已結算</span>
-                                </button>
-                            )}
-                        </div>
-                    </div>
-
-                    <div className="flex rounded-2xl bg-slate-200/60 p-1.5 mb-6 text-xs sm:text-sm font-semibold">
-                        <button 
-                            onClick={() => setActiveTab('dashboard')}
-                            className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-1 ${activeTab === 'dashboard' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                        >
-                            📊 結算總覽
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('add')}
-                            className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-1 ${activeTab === 'add' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                        >
-                            ➕ 新增採購
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('dinners')}
-                            className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-1 ${activeTab === 'dinners' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                        >
-                            🍽️ 晚餐登記
-                        </button>
-                        <button 
-                            onClick={() => setActiveTab('list')}
-                            className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-1 ${activeTab === 'list' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
-                        >
-                            📝 明細 ({weeklyExpenses.length})
-                        </button>
-                    </div>
-
-                    {/* TAB 1: DASHBOARD / SETTLEMENT */}
-                    {activeTab === 'dashboard' && (
-                        <div className="space-y-6">
-                            
-                            {/* Total Expense Card */}
-                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 flex justify-between items-center">
-                                <div>
-                                    <div className="text-xs font-medium text-slate-400 mb-0.5">【{selectedWeek}】食材費用總計</div>
-                                    <div className="text-3xl font-extrabold text-slate-900">
-                                        £{summary.totalSpent.toFixed(2)} <span className="text-xs text-slate-400 font-normal">GBP</span>
-                                    </div>
-                                </div>
-                                <div className="text-right">
-                                    <div className="text-xs text-slate-400">採購筆數</div>
-                                    <div className="text-lg font-bold text-emerald-600">{weeklyExpenses.length} 筆</div>
-                                </div>
-                            </div>
-
-                            {/* Settlement Recommendation */}
-                            <div className="bg-gradient-to-br from-amber-50 to-orange-50/50 p-5 rounded-2xl border border-amber-200/80 shadow-sm">
-                                <h3 className="text-sm font-bold text-amber-900 mb-3 flex items-center gap-2">
-                                    <span>💡 本週最佳轉帳結算方案</span>
-                                    <span className="text-[10px] bg-amber-200/80 text-amber-800 px-2 py-0.5 rounded-full font-normal">簡化轉帳</span>
-                                </h3>
-
-                                {summary.transfers.length === 0 ? (
-                                    <div className="bg-white/80 rounded-xl p-4 text-center text-slate-500 text-sm">
-                                        🎉 目前大家金額已完全平衡，或是尚未有採購紀錄！
-                                    </div>
-                                ) : (
-                                    <div className="space-y-2.5">
-                                        {summary.transfers.map((t, idx) => {
-                                            const fromRm = roommates.find(r => r.id === t.from) || { avatar: '👤' };
-                                            const toRm = roommates.find(r => r.id === t.to) || { avatar: '👤' };
-                                            return (
-                                                <div key={idx} className="bg-white p-3.5 rounded-xl border border-amber-100 shadow-sm flex items-center justify-between text-sm">
-                                                    <div className="flex items-center gap-2 font-semibold text-slate-700">
-                                                        <span className="bg-rose-100 text-rose-700 px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1">
-                                                            <span>{fromRm.avatar}</span>
-                                                            <span>{t.from}</span>
-                                                        </span>
-                                                        <span className="text-slate-400 font-normal">應給</span>
-                                                        <span className="bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1">
-                                                            <span>{toRm.avatar}</span>
-                                                            <span>{t.to}</span>
-                                                        </span>
-                                                    </div>
-                                                    <div className="text-base font-extrabold text-amber-600">
-                                                        £{t.amount.toFixed(2)}
-                                                    </div>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Roommates Breakdown Grid */}
-                            <div>
-                                <h3 className="text-sm font-bold text-slate-700 mb-3">👥 三人個別分攤細節</h3>
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                                    {roommates.map(r => {
-                                        const paid = summary.paidMap[r.id] || 0;
-                                        const share = summary.shareMap[r.id] || 0;
-                                        const net = summary.netMap[r.id] || 0;
-
-                                        return (
-                                            <div key={r.id} className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col justify-between">
-                                                <div>
-                                                    <div className="flex items-center justify-between mb-3">
-                                                        <span className="text-2xl">{r.avatar}</span>
-                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded-md border ${r.color}`}>
-                                                            {r.name}
-                                                        </span>
-                                                    </div>
-
-                                                    <div className="space-y-1 text-xs text-slate-500 mb-3">
-                                                        <div className="flex justify-between">
-                                                            <span>先付金額:</span>
-                                                            <span className="font-semibold text-slate-700">£{paid.toFixed(2)}</span>
-                                                        </div>
-                                                        <div className="flex justify-between">
-                                                            <span>應付份額:</span>
-                                                            <span className="font-semibold text-slate-700">£{share.toFixed(2)}</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                <div className="pt-2 border-t border-slate-100 flex justify-between items-center text-xs">
-                                                    <span className="text-slate-400 font-medium">結算結果:</span>
-                                                    <span className={`font-bold text-sm ${net > 0.01 ? 'text-emerald-600' : net < -0.01 ? 'text-rose-600' : 'text-slate-400'}`}>
-                                                        {net > 0.01 ? `+£${net.toFixed(2)}` : net < -0.01 ? `-£${Math.abs(net).toFixed(2)}` : '£0.00'}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                        </div>
-                    )}
-
-                    {/* TAB 2: ADD EXPENSE FORM */}
-                    {activeTab === 'add' && (
-                        <form onSubmit={handleAddExpense} className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200/80 space-y-5">
-                            <h2 className="text-base font-bold text-slate-800 border-b border-slate-100 pb-3">
-                                🛒 新增採購費用
-                            </h2>
-
-                            {/* Title */}
-                            <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                    購買品項 / 說明 <span className="text-rose-500">*</span>
-                                </label>
-                                <input 
-                                    type="text" 
-                                    placeholder="例如：高麗菜、豬肉片、牛奶..."
-                                    value={title}
-                                    onChange={(e) => setTitle(e.target.value)}
-                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                    required
-                                />
-                            </div>
-
-                            {/* Amount & Date */}
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                        總金額 (£) <span className="text-rose-500">*</span>
-                                    </label>
-                                    <input 
-                                        type="number" 
-                                        step="any"
-                                        placeholder="0.00"
-                                        value={amount}
-                                        onChange={(e) => setAmount(e.target.value)}
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                        required
-                                    />
-                                </div>
-
-                                <div>
-                                    <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                        採購日期
-                                    </label>
-                                    <input 
-                                        type="date" 
-                                        value={date}
-                                        onChange={(e) => setDate(e.target.value)}
-                                        className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Auto exclusion notice */}
-                            {autoExcludedNote && (
-                                <div className="bg-amber-50 border border-amber-200 text-amber-800 px-3.5 py-2 rounded-xl text-xs font-medium">
-                                    {autoExcludedNote}
-                                </div>
-                            )}
-
-                            {/* Category */}
-                            <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                    類別
-                                </label>
-                                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                                    {CATEGORIES.map(c => (
-                                        <button
-                                            type="button"
-                                            key={c.id}
-                                            onClick={() => setCategory(c.id)}
-                                            className={`p-2 rounded-xl text-xs font-medium flex flex-col items-center gap-1 border transition ${category === c.id ? 'bg-emerald-50 border-emerald-500 text-emerald-700 font-bold' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
-                                        >
-                                            <span className="text-lg">{c.emoji}</span>
-                                            <span>{c.name}</span>
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Who Paid */}
-                            <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                    誰先出的錢？
-                                </label>
-                                <div className="grid grid-cols-3 gap-2">
-                                    {roommates.map(r => (
-                                        <button
-                                            type="button"
-                                            key={r.id}
-                                            onClick={() => setPayer(r.id)}
-                                            className={`p-3 rounded-xl text-xs font-semibold border flex items-center justify-center gap-2 transition ${payer === r.id ? 'bg-emerald-600 border-emerald-600 text-white shadow-sm' : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100'}`}
-                                        >
-                                            <span>{r.avatar}</span>
-                                            <span>{r.name}</span>
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            {/* Who Splits */}
-                            <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                    參與分攤的人
-                                </label>
-                                <div className="grid grid-cols-3 gap-2">
-                                    {roommates.map(r => {
-                                        const isChecked = participants.includes(r.id);
-                                        const isOutDate = dinnersOut[`${date}_${r.id}`]?.out;
-
-                                        return (
-                                            <button
-                                                type="button"
-                                                key={r.id}
-                                                onClick={() => toggleParticipant(r.id)}
-                                                className={`p-3 rounded-xl text-xs font-semibold border flex items-center justify-between transition ${isChecked ? 'bg-slate-800 border-slate-800 text-white' : 'border-slate-200 bg-slate-50 text-slate-400 hover:bg-slate-100'}`}
-                                            >
-                                                <span className="flex items-center gap-1.5">
-                                                    <span>{r.avatar}</span>
-                                                    <span>{r.name}</span>
-                                                </span>
-                                                <span className="flex items-center gap-1">
-                                                    {isOutDate && <span className="text-[10px] bg-rose-500/20 text-rose-300 px-1 rounded">不回吃</span>}
-                                                    <span>{isChecked ? '✓' : ''}</span>
-                                                </span>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-
-                            {/* Note */}
-                            <div>
-                                <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-                                    備註 (選填)
-                                </label>
-                                <input 
-                                    type="text" 
-                                    placeholder="例如：特價折扣、外食替代..."
-                                    value={note}
-                                    onChange={(e) => setNote(e.target.value)}
-                                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                />
-                            </div>
-
-                            {/* Submit Button */}
-                            <button 
-                                type="submit"
-                                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl text-sm shadow-md transition"
-                            >
-                                儲存這筆採購紀錄
-                            </button>
-                        </form>
-                    )}
-
-                    {/* TAB 3: DINNER ATTENDANCE REGISTER */}
-                    {activeTab === 'dinners' && (
-                        <div className="space-y-4">
-                            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80">
-                                <div className="flex items-center justify-between mb-2">
-                                    <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
-                                        <span>🍽️ 本週晚餐不回吃登記</span>
-                                    </h2>
-                                    <span className="text-xs text-slate-400">點擊按鈕快速切換狀態</span>
-                                </div>
-                                <p className="text-xs text-slate-500 leading-relaxed mb-4">
-                                    預先登記當日是否回家吃晚餐，新增採購時會**自動排除**不吃晚餐的室友，讓分攤更精準！
-                                </p>
-
-                                <div className="space-y-3">
-                                    {weekDays.map(day => (
-                                        <div 
-                                            key={day.dateStr} 
-                                            className={`p-3.5 rounded-2xl border transition ${day.isToday ? 'bg-emerald-50/50 border-emerald-200 ring-1 ring-emerald-300' : 'bg-slate-50/60 border-slate-200/80'}`}
-                                        >
-                                            <div className="flex items-center justify-between mb-2.5">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-bold text-sm text-slate-800">{day.dayName}</span>
-                                                    <span className="text-xs text-slate-400 font-medium">{day.label}</span>
-                                                    {day.isToday && (
-                                                        <span className="bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
-                                                            Today
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                                {roommates.map(r => {
-                                                    const key = `${day.dateStr}_${r.id}`;
-                                                    const item = dinnersOut[key];
-                                                    const isOut = item && item.out;
-
-                                                    return (
-                                                        <div key={r.id} className="flex flex-col gap-1">
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => toggleDinnerOut(day.dateStr, r.id)}
-                                                                className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between transition ${isOut ? 'bg-rose-50 border-rose-300 text-rose-700 shadow-sm' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'}`}
-                                                            >
-                                                                <span className="flex items-center gap-1.5">
-                                                                    <span>{r.avatar}</span>
-                                                                    <span>{r.name}</span>
-                                                                </span>
-                                                                <span>{isOut ? '❌ 不回吃' : '🍽️ 在家吃'}</span>
-                                                            </button>
-
-                                                            {isOut && (
-                                                                <input 
-                                                                    type="text"
-                                                                    placeholder="外食原因 (如: 加班)"
-                                                                    value={item.note || ''}
-                                                                    onChange={(e) => setDinnerNote(day.dateStr, r.id, e.target.value)}
-                                                                    className="bg-white border border-rose-200 text-rose-800 text-[11px] px-2 py-1 rounded-lg focus:outline-none focus:ring-1 focus:ring-rose-400"
-                                                                />
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* TAB 4: TRANSACTION LIST */}
-                    {activeTab === 'list' && (
-                        <div className="space-y-3">
-                            {weeklyExpenses.length === 0 ? (
-                                <div className="bg-white p-8 rounded-2xl border border-slate-200 text-center text-slate-400 text-sm">
-                                    🛒 【{selectedWeek}】尚無採購紀錄，點擊「新增採購」開始記帳吧！
-                                </div>
-                            ) : (
-                                weeklyExpenses.map(exp => {
-                                    const catObj = CATEGORIES.find(c => c.id === exp.category) || CATEGORIES[5];
-                                    const payerRoommate = roommates.find(r => r.id === exp.payer) || { avatar: '👤' };
-
-                                    return (
-                                        <div key={exp.id} className="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-slate-300 transition">
-                                            <div className="flex items-start gap-3">
-                                                <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center text-xl shrink-0">
-                                                    {catObj.emoji}
-                                                </div>
-                                                <div>
-                                                    <div className="font-bold text-slate-800 text-sm">{exp.title}</div>
-                                                    <div className="text-xs text-slate-400 mt-0.5 flex flex-wrap items-center gap-2">
-                                                        <span>{exp.date}</span>
-                                                        <span>•</span>
-                                                        <span className="text-emerald-700 font-medium flex items-center gap-1">
-                                                            <span>付款:</span>
-                                                            <span>{payerRoommate.avatar}</span>
-                                                            <span>{exp.payer}</span>
-                                                        </span>
-                                                        {exp.note && <span className="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{exp.note}</span>}
-                                                    </div>
-                                                    <div className="text-[11px] text-slate-400 mt-1">
-                                                        分攤: {exp.participants.join(', ')} (每人 £{(exp.amount / exp.participants.length).toFixed(2)})
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            <div className="flex items-center justify-between sm:justify-end gap-3 pt-2 sm:pt-0 border-t sm:border-0 border-slate-100">
-                                                <div className="text-right">
-                                                    <div className="text-lg font-bold text-slate-900">£{parseFloat(exp.amount).toFixed(2)}</div>
-                                                </div>
-                                                
-                                                {confirmDeleteId === exp.id ? (
-                                                    <div className="flex items-center gap-1">
-                                                        <button 
-                                                            onClick={() => handleDelete(exp.id)}
-                                                            className="bg-rose-600 text-white text-xs px-2.5 py-1.5 rounded-lg font-bold"
-                                                        >
-                                                            確認刪除
-                                                        </button>
-                                                        <button 
-                                                            onClick={() => setConfirmDeleteId(null)}
-                                                            className="bg-slate-200 text-slate-600 text-xs px-2.5 py-1.5 rounded-lg"
-                                                        >
-                                                            取消
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    <button 
-                                                        onClick={() => setConfirmDeleteId(exp.id)}
-                                                        className="text-slate-300 hover:text-rose-500 p-1.5 rounded-lg transition"
-                                                        title="刪除"
-                                                    >
-                                                        🗑️
-                                                    </button>
-                                                )}
-                                            </div>
-                                        </div>
-                                    );
-                                })
-                            )}
-                        </div>
-                    )}
-
-                    {/* Footer Info */}
-                    <footer className="mt-12 text-center text-xs text-slate-400 space-y-2">
-                        <p>💡 資料儲存於您的本機瀏覽器中，無須擔心外洩。</p>
-                        <p>© 室友共享廚房小額採購紀錄工具 · Janice / Carrie / Kingsley</p>
-                    </footer>
-
+          }
+          debtors[i].amount -= pay;
+          creditors[j].amount -= pay;
+          if (debtors[i].amount < 0.01) i++;
+          if (creditors[j].amount < 0.01) j++;
+        }
+
+        return { paidMap, oweMap, netMap, transfers };
+      }, [currentWeekExpenses]);
+
+      // --- 確認消帳邏輯 ---
+      const handleTogglePaymentStatus = (transferId, actionType) => {
+        const weekSettles = settlements[selectedWeekKey] || {};
+        const currentStatus = weekSettles[transferId] || { payerPaid: false, receiverConfirmed: false };
+
+        let updatedStatus = { ...currentStatus };
+        if (actionType === 'payer_pay') {
+          updatedStatus.payerPaid = !updatedStatus.payerPaid;
+        } else if (actionType === 'receiver_confirm') {
+          updatedStatus.receiverConfirmed = !updatedStatus.receiverConfirmed;
+        }
+
+        const updatedWeekSettles = { ...weekSettles, [transferId]: updatedStatus };
+        const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekSettles };
+
+        setSettlements(updatedSettlements);
+        saveData(undefined, undefined, updatedSettlements);
+      };
+
+      const getRoommateObj = (id) => DEFAULT_ROOMMATES.find(r => r.id === id) || { name: id, emoji: '👤' };
+
+      return (
+        <div className="max-w-3xl mx-auto p-4 pb-24">
+          {/* 頂部 Header */}
+          <header className="bg-white rounded-2xl p-5 shadow-sm mb-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4 border border-slate-200">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+                <span>🇬🇧</span> 室友買菜與煮飯帳本
+              </h1>
+              <p className="text-xs text-slate-500 mt-1">Janice • Carrie • Kingsley 專屬小額採購按週分攤</p>
+            </div>
+
+            {/* 當前使用者選擇器 */}
+            <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 flex items-center gap-2">
+              <span className="text-xs font-semibold text-slate-600">👤 目前你是：</span>
+              <div className="flex gap-1">
+                {DEFAULT_ROOMMATES.map(r => (
+                  <button
+                    key={r.id}
+                    onClick={() => setCurrentUser(r.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
+                      currentUser === r.id 
+                        ? 'bg-emerald-600 text-white shadow-sm' 
+                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    {r.emoji} {r.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </header>
+
+          {/* 週選擇與導覽列 */}
+          <div className="bg-white rounded-2xl p-4 shadow-sm mb-5 border border-slate-200">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <i className="fa-solid fa-calendar-week text-emerald-600 text-lg"></i>
+                <span className="font-bold text-slate-700">選擇計算週期：</span>
+              </div>
+              <select
+                value={selectedWeekKey}
+                onChange={(e) => setSelectedWeekKey(e.target.value)}
+                className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                {weeksList.map(w => (
+                  <option key={w.key} value={w.key}>{w.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Tab 頁籤切換 */}
+          <div className="flex bg-slate-200/80 p-1 rounded-2xl mb-5 text-sm font-semibold">
+            <button
+              onClick={() => setActiveTab('expenses')}
+              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'expenses' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <i className="fa-solid fa-cart-shopping"></i>
+              採購明細
+            </button>
+            <button
+              onClick={() => setActiveTab('dinner')}
+              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'dinner' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <i className="fa-solid fa-utensils"></i>
+              晚餐不回家吃登記
+            </button>
+            <button
+              onClick={() => setActiveTab('settlement')}
+              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'settlement' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <i className="fa-solid fa-calculator"></i>
+              本週結算 & 消帳
+            </button>
+          </div>
+
+          {/* TAB 1: 採購紀錄與新增 */}
+          {activeTab === 'expenses' && (
+            <div className="space-y-5">
+              {/* 新增費用表單 */}
+              <form onSubmit={handleAddExpense} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+                <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <i className="fa-solid fa-plus-circle text-emerald-600"></i>
+                  新增採購明細
+                </h2>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">物品/超市名稱</label>
+                    <input
+                      type="text"
+                      placeholder="例：Sainsbury's 蔬菜雞胸肉"
+                      value={itemTitle}
+                      onChange={(e) => setItemTitle(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">總金額 (£ 英鎊)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={itemAmount}
+                      onChange={(e) => setItemAmount(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">採購日期</label>
+                    <input
+                      type="date"
+                      value={itemDate}
+                      onChange={(e) => setItemDate(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">先行先付人 (Payer)</label>
+                    <select
+                      value={itemPayer}
+                      onChange={(e) => setItemPayer(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    >
+                      {DEFAULT_ROOMMATES.map(r => (
+                        <option key={r.id} value={r.id}>{r.emoji} {r.name}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-            );
-        }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
+                {/* 分攤成員 */}
+                <div className="mt-4">
+                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">分攤成員 (預設 3 人均分)</label>
+                  <div className="flex gap-3">
+                    {DEFAULT_ROOMMATES.map(r => {
+                      const isChecked = itemSplit.includes(r.id);
+                      return (
+                        <label
+                          key={r.id}
+                          className={`flex-1 flex items-center justify-center gap-2 p-2.5 rounded-xl cursor-pointer border transition text-sm font-medium ${
+                            isChecked 
+                              ? 'bg-emerald-50 border-emerald-500 text-emerald-800' 
+                              : 'bg-slate-50 border-slate-200 text-slate-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              if (isChecked) {
+                                if (itemSplit.length === 1) return alert('至少需有一人分攤！');
+                                setItemSplit(itemSplit.filter(id => id !== r.id));
+                              } else {
+                                setItemSplit([...itemSplit, r.id]);
+                              }
+                            }}
+                            className="hidden"
+                          />
+                          <span>{r.emoji}</span>
+                          <span>{r.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 登記人標示 */}
+                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                  <span>📝 登記人：<strong className="text-slate-700">{getRoommateObj(registeredBy).emoji} {registeredBy}</strong></span>
+                  <button
+                    type="submit"
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-2.5 rounded-xl shadow-md transition flex items-center gap-2 text-sm"
+                  >
+                    <i className="fa-solid fa-check"></i>
+                    確認新增
+                  </button>
+                </div>
+              </form>
+
+              {/* 明細列表 */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-list-check text-emerald-600"></i>
+                    當週採購紀錄 ({currentWeekExpenses.length} 筆)
+                  </h3>
+                  <span className="text-xs bg-slate-100 text-slate-600 font-semibold px-2.5 py-1 rounded-lg">
+                    當週總額：£{currentWeekExpenses.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}
+                  </span>
+                </div>
+
+                {currentWeekExpenses.length === 0 ? (
+                  <div className="text-center py-10 text-slate-400 text-sm">
+                    <i className="fa-solid fa-basket-shopping text-3xl mb-2 block"></i>
+                    本週尚無採購紀錄，點擊上方表單新增第一筆吧！
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {currentWeekExpenses.map(exp => (
+                      <div key={exp.id} className="p-3.5 rounded-xl border border-slate-100 hover:border-slate-300 bg-slate-50/50 flex items-center justify-between transition">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-slate-800">{exp.title}</span>
+                            <span className="text-emerald-700 font-extrabold text-base">£{exp.amount.toFixed(2)}</span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-1">
+                            <span>📅 {exp.date}</span>
+                            <span>💳 由 {getRoommateObj(exp.payer).emoji} {exp.payer} 付款</span>
+                            <span>👥 分攤：{exp.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
+                            <span className="text-slate-400">📝 登記人：{getRoommateObj(exp.registeredBy || exp.payer).name}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleDeleteExpense(exp.id)}
+                          className="text-slate-300 hover:text-red-500 p-2 transition"
+                          title="刪除此筆紀錄"
+                        >
+                          <i className="fa-solid fa-trash-can"></i>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: 晚餐不回家吃登記 */}
+          {activeTab === 'dinner' && (
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+              <h2 className="text-base font-bold text-slate-800 mb-2 flex items-center gap-2">
+                <i className="fa-solid fa-utensils text-emerald-600"></i>
+                本週晚餐「不回家吃」登記表
+              </h2>
+              <p className="text-xs text-slate-500 mb-4">
+                勾選「❌ 不回家吃」後，系統新增當天採購明細時會**自動將該室友排除分攤**！
+              </p>
+
+              <div className="space-y-3">
+                {[0, 1, 2, 3, 4, 5, 6].map(offset => {
+                  const dateObj = new Date(currentWeekObj.startDate);
+                  dateObj.setDate(dateObj.getDate() + offset);
+                  const dateStr = dateObj.toISOString().split('T')[0];
+                  const dayNames = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
+                  const absentList = dinnerAbsent[dateStr] || [];
+
+                  return (
+                    <div key={dateStr} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-sm text-slate-700">{dateStr} ({dayNames[dateObj.getDay()]})</span>
+                      </div>
+
+                      <div className="flex gap-2">
+                        {DEFAULT_ROOMMATES.map(r => {
+                          const isAbsent = absentList.includes(r.id);
+                          return (
+                            <button
+                              key={r.id}
+                              onClick={() => toggleDinnerAbsent(dateStr, r.id)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border ${
+                                isAbsent 
+                                  ? 'bg-rose-100 text-rose-700 border-rose-300' 
+                                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              }`}
+                            >
+                              <span>{r.emoji}</span>
+                              <span>{r.name}</span>
+                              <span>{isAbsent ? '❌ 不回家吃' : '🍽️ 在家吃'}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: 本週結算與消帳 */}
+          {activeTab === 'settlement' && (
+            <div className="space-y-5">
+              {/* 三人收支摘要卡片 */}
+              <div className="grid grid-cols-3 gap-3">
+                {DEFAULT_ROOMMATES.map(r => {
+                  const paid = weeklyCalculation.paidMap[r.id] || 0;
+                  const owe = weeklyCalculation.oweMap[r.id] || 0;
+                  const net = weeklyCalculation.netMap[r.id] || 0;
+
+                  return (
+                    <div key={r.id} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-center">
+                      <div className="text-2xl mb-1">{r.emoji}</div>
+                      <div className="font-bold text-slate-800 text-sm">{r.name}</div>
+                      <div className="text-xs text-slate-500 mt-1">實付: £{paid.toFixed(2)}</div>
+                      <div className="text-xs text-slate-500">應付: £{owe.toFixed(2)}</div>
+                      
+                      <div className={`mt-2 pt-2 border-t text-sm font-extrabold ${
+                        net > 0.009 ? 'text-emerald-600' : net < -0.009 ? 'text-rose-600' : 'text-slate-400'
+                      }`}>
+                        {net > 0.009 ? `+£${net.toFixed(2)}` : net < -0.009 ? `-£${Math.abs(net).toFixed(2)}` : '£0.00'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 轉帳與雙方確認消帳清單 */}
+              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
+                  <i className="fa-solid fa-money-bill-transfer text-emerald-600"></i>
+                  最佳化清算方案與雙方消帳確認
+                </h3>
+
+                {weeklyCalculation.transfers.length === 0 ? (
+                  <div className="text-center py-8 text-emerald-600 font-medium text-sm">
+                    🎉 本週帳目平衡，不需要進行任何轉帳！
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {weeklyCalculation.transfers.map(tr => {
+                      const weekSettles = settlements[selectedWeekKey] || {};
+                      const status = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+                      const isCleared = status.payerPaid && status.receiverConfirmed;
+
+                      const fromObj = getRoommateObj(tr.from);
+                      const toObj = getRoommateObj(tr.to);
+
+                      return (
+                        <div key={tr.id} className={`p-4 rounded-xl border transition ${
+                          isCleared ? 'bg-emerald-50/60 border-emerald-300' : 'bg-slate-50 border-slate-200'
+                        }`}>
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-base">
+                              <span>{fromObj.emoji} {fromObj.name}</span>
+                              <i className="fa-solid fa-arrow-right text-slate-400 text-xs"></i>
+                              <span>{toObj.emoji} {toObj.name}</span>
+                              <span className="text-emerald-700 font-extrabold ml-1">£{tr.amount.toFixed(2)}</span>
+                            </div>
+
+                            {/* 狀態標籤 */}
+                            <div>
+                              {isCleared ? (
+                                <span className="bg-emerald-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-sm">
+                                  <i className="fa-solid fa-circle-check mr-1"></i> 已雙方消帳
+                                </span>
+                              ) : (
+                                <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
+                                  ⏳ 待完成結算
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 雙方確認按鈕區域 */}
+                          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
+                            {/* 付款方按鈕 */}
+                            <button
+                              onClick={() => handleTogglePaymentStatus(tr.id, 'payer_pay')}
+                              className={`p-2 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition ${
+                                status.payerPaid
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                              }`}
+                            >
+                              <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
+                              <span>付款方 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '點擊標記已付款'}</span>
+                            </button>
+
+                            {/* 收款方確認消帳按鈕 */}
+                            <button
+                              onClick={() => handleTogglePaymentStatus(tr.id, 'receiver_confirm')}
+                              className={`p-2 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition ${
+                                status.receiverConfirmed
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : status.payerPaid 
+                                    ? 'bg-emerald-600 text-white shadow hover:bg-emerald-700' 
+                                    : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
+                              }`}
+                            >
+                              <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
+                              <span>收款方 ({toObj.name})：{status.receiverConfirmed ? '已確認收款 (已消帳)' : '確認收到並消帳'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
 </body>
 </html>
