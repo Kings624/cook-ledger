@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>室友煮飯採購與結算帳本</title>
+  <title>🏡 室友溫馨煮飯與採購帳本</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- React & ReactDOM -->
@@ -13,28 +13,46 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <!-- FontAwesome Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Google Identity Services (GIS) SDK -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- Google Fonts: Rounded & Friendly Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { font-family: 'Fredoka', 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .cute-card { border-radius: 1.5rem; transition: transform 0.2s, box-shadow 0.2s; }
+    .cute-card:hover { transform: translateY(-2px); }
   </style>
 </head>
-<body class="bg-slate-100 text-slate-800 antialiased">
+<body class="bg-rose-50/40 text-slate-800 antialiased min-h-screen">
   <div id="root"></div>
 
   <script type="text/babel">
     const { useState, useEffect, useMemo } = React;
 
-    const DEFAULT_ROOMMATES = [
+    // 採購類別選單
+    const CATEGORIES = [
+      { id: 'veg', name: '蔬菜水果', emoji: '🥦', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
+      { id: 'meat', name: '肉類海鮮', emoji: '🥩', color: 'bg-rose-100 text-rose-800 border-rose-300' },
+      { id: 'staple', name: '麵包主食', emoji: '🍞', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+      { id: 'drink', name: '飲料零食', emoji: '🧃', color: 'bg-purple-100 text-purple-800 border-purple-300' },
+      { id: 'pantry', name: '日用調味', emoji: '🧴', color: 'bg-sky-100 text-sky-800 border-sky-300' },
+      { id: 'other', name: '其他採購', emoji: '🛍️', color: 'bg-slate-100 text-slate-800 border-slate-300' }
+    ];
+
+    // 預設可供選擇的 Emoji 選項
+    const EMOJI_PALETTE = ['👩🏻‍🍳', '👩🏼‍🌾', '👨🏻‍🍳', '🐱', '🐰', '🐶', '🍓', '🥑', '🥞', '🥐', '🍣', '🧋', '🧸', '🌸', '💫', '💖'];
+
+    const INITIAL_ROOMMATES = [
       { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳' },
       { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾' },
       { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳' }
     ];
 
-    // 生成過去 13 週 (約 3 個月) 的週選項
+    // 生成過去 13 週 (約 3 個月) 週選項
     function getPast13Weeks() {
       const weeks = [];
       const now = new Date();
       
-      // 計算本週一
       const day = now.getDay();
       const diffToMonday = (day === 0 ? -6 : 1) - day;
       const currentMonday = new Date(now);
@@ -62,63 +80,111 @@
       const weeksList = useMemo(() => getPast13Weeks(), []);
       const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
       const [activeTab, setActiveTab] = useState('expenses'); // 'expenses', 'dinner', 'settlement'
+      
+      // 室友資料與頭像
+      const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [currentUser, setCurrentUser] = useState('Kingsley');
+      const [showEmojiPickerFor, setShowEmojiPickerFor] = useState(null);
+
+      // Google 帳號狀態
+      const [googleUser, setGoogleUser] = useState(null);
 
       // 資料狀態
       const [expenses, setExpenses] = useState([]);
-      const [dinnerAbsent, setDinnerAbsent] = useState({}); // { '2026-09-08': ['Janice'] }
-      const [settlements, setSettlements] = useState({}); // { weekKey: [ { id, from, to, amount, payerPaid, receiverConfirmed } ] }
+      const [dinnerAbsent, setDinnerAbsent] = useState({});
+      const [settlements, setSettlements] = useState({});
 
-      // 本機與全域雲端儲存同步 (以 cook_ledger_shared_data 為 Key)
+      // 載入與儲存數據
       useEffect(() => {
-        const saved = localStorage.getItem('cook_ledger_shared_data_v2');
+        const saved = localStorage.getItem('cook_ledger_shared_data_v3');
         if (saved) {
           try {
             const parsed = JSON.parse(saved);
             if (parsed.expenses) setExpenses(parsed.expenses);
             if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
             if (parsed.settlements) setSettlements(parsed.settlements);
+            if (parsed.roommates) setRoommates(parsed.roommates);
           } catch(e) { console.error(e); }
         }
       }, []);
 
-      const saveData = (newExpenses, newDinner, newSettlements) => {
+      const saveData = (newExp, newDin, newSet, newRm) => {
         const payload = {
-          expenses: newExpenses !== undefined ? newExpenses : expenses,
-          dinnerAbsent: newDinner !== undefined ? newDinner : dinnerAbsent,
-          settlements: newSettlements !== undefined ? newSettlements : settlements
+          expenses: newExp !== undefined ? newExp : expenses,
+          dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
+          settlements: newSet !== undefined ? newSet : settlements,
+          roommates: newRm !== undefined ? newRm : roommates
         };
-        localStorage.setItem('cook_ledger_shared_data_v2', JSON.stringify(payload));
+        localStorage.setItem('cook_ledger_shared_data_v3', JSON.stringify(payload));
+      };
+
+      // 初始化 Google 登入 SDK
+      useEffect(() => {
+        if (window.google && window.google.accounts) {
+          try {
+            window.google.accounts.id.initialize({
+              client_id: "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com", // 可替換為註冊的 Client ID
+              callback: handleGoogleLoginResponse
+            });
+            window.google.accounts.id.renderButton(
+              document.getElementById("googleBtnContainer"),
+              { theme: "outline", size: "medium", shape: "pill", text: "signin_with" }
+            );
+          } catch(e) { console.log('Google Sign In SDK Notice:', e); }
+        }
+      }, []);
+
+      const handleGoogleLoginResponse = (response) => {
+        try {
+          // 解析 Google JWT Token 取得用戶資料
+          const base64Url = response.credential.split('.')[1];
+          const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+          const jsonPayload = decodeURIComponent(atob(base64).split('').map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+          const profile = JSON.parse(jsonPayload);
+
+          setGoogleUser({
+            name: profile.name,
+            email: profile.email,
+            picture: profile.picture
+          });
+          alert(`🎉 歡迎登入！Google 帳號：${profile.name} (${profile.email})`);
+        } catch(e) { console.error(e); }
+      };
+
+      // --- 更換室友頭像 Emoji ---
+      const handleUpdateEmoji = (personId, newEmoji) => {
+        const updated = roommates.map(r => r.id === personId ? { ...r, emoji: newEmoji } : r);
+        setRoommates(updated);
+        saveData(undefined, undefined, undefined, updated);
+        setShowEmojiPickerFor(null);
       };
 
       // --- 新增採購項目 ---
       const [itemTitle, setItemTitle] = useState('');
       const [itemAmount, setItemAmount] = useState('');
+      const [itemCategory, setItemCategory] = useState('veg');
       const [itemPayer, setItemPayer] = useState(currentUser);
       const [itemDate, setItemDate] = useState(new Date().toISOString().split('T')[0]);
       const [itemSplit, setItemSplit] = useState(['Janice', 'Carrie', 'Kingsley']);
-      const [registeredBy, setRegisteredBy] = useState(currentUser);
 
-      // 當切換 currentUser 時自動切換預設登記人與付款人
       useEffect(() => {
         setItemPayer(currentUser);
-        setRegisteredBy(currentUser);
       }, [currentUser]);
 
-      // 當選擇日期改變時，檢視當天「不回家吃」的紀錄並提醒
+      // 當日期變更時，自動過濾「不回家吃」的室友
       useEffect(() => {
         const absentList = dinnerAbsent[itemDate] || [];
         if (absentList.length > 0) {
-          setItemSplit(DEFAULT_ROOMMATES.map(r => r.id).filter(id => !absentList.includes(id)));
+          setItemSplit(roommates.map(r => r.id).filter(id => !absentList.includes(id)));
         } else {
-          setItemSplit(['Janice', 'Carrie', 'Kingsley']);
+          setItemSplit(roommates.map(r => r.id));
         }
-      }, [itemDate, dinnerAbsent]);
+      }, [itemDate, dinnerAbsent, roommates]);
 
       const handleAddExpense = (e) => {
         e.preventDefault();
         if (!itemTitle || !itemAmount || parseFloat(itemAmount) <= 0 || itemSplit.length === 0) {
-          alert('請填寫完整採購名稱、金額並至少選擇一位分攤人！');
+          alert('請填寫買菜名稱、金額，並選擇至少一位分攤人！');
           return;
         }
 
@@ -126,45 +192,51 @@
           id: 'exp_' + Date.now(),
           title: itemTitle,
           amount: parseFloat(itemAmount),
+          category: itemCategory,
           payer: itemPayer,
           date: itemDate,
           splitWith: itemSplit,
-          registeredBy: registeredBy || currentUser,
+          registeredBy: currentUser,
+          googleEmail: googleUser ? googleUser.email : null,
           createdAt: new Date().toISOString()
         };
 
         const updated = [newEntry, ...expenses];
         setExpenses(updated);
-        saveData(updated, undefined, undefined);
+        saveData(updated, undefined, undefined, undefined);
 
         setItemTitle('');
         setItemAmount('');
-        alert('✅ 採購紀錄已成功新增！');
+        alert('✨ 成功加入採購明細！');
       };
 
-      const handleDeleteExpense = (id) => {
-        if (confirm('確定要刪除這筆採購紀錄嗎？')) {
-          const updated = expenses.filter(e => e.id !== id);
+      // 僅限登記人刪除
+      const handleDeleteExpense = (exp) => {
+        if (exp.registeredBy !== currentUser) {
+          alert(`🔒 權限限制：此筆採購是由 ${exp.registeredBy} 登記的，只有登記人才能刪除喔！`);
+          return;
+        }
+
+        if (confirm(`確定要刪除「${exp.title}」這筆紀錄嗎？`)) {
+          const updated = expenses.filter(e => e.id !== exp.id);
           setExpenses(updated);
-          saveData(updated, undefined, undefined);
+          saveData(updated, undefined, undefined, undefined);
         }
       };
 
-      // --- 晚餐不回家吃登記 ---
+      // 晚餐登記切換
       const toggleDinnerAbsent = (dateStr, personId) => {
         const currentList = dinnerAbsent[dateStr] || [];
-        let updatedList = [];
-        if (currentList.includes(personId)) {
-          updatedList = currentList.filter(p => p !== personId);
-        } else {
-          updatedList = [...currentList, personId];
-        }
+        const updatedList = currentList.includes(personId)
+          ? currentList.filter(p => p !== personId)
+          : [...currentList, personId];
+
         const updatedDinner = { ...dinnerAbsent, [dateStr]: updatedList };
         setDinnerAbsent(updatedDinner);
-        saveData(undefined, updatedDinner, undefined);
+        saveData(undefined, updatedDinner, undefined, undefined);
       };
 
-      // --- 篩選當週採購 ---
+      // 當週數據計算
       const currentWeekObj = useMemo(() => {
         return weeksList.find(w => w.key === selectedWeekKey) || weeksList[0];
       }, [selectedWeekKey, weeksList]);
@@ -180,28 +252,26 @@
         });
       }, [expenses, currentWeekObj]);
 
-      // --- 計算本週結算金額 ---
       const weeklyCalculation = useMemo(() => {
         const paidMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
         const oweMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
 
         currentWeekExpenses.forEach(exp => {
-          paidMap[exp.payer] += exp.amount;
+          paidMap[exp.payer] = (paidMap[exp.payer] || 0) + exp.amount;
           const share = exp.amount / exp.splitWith.length;
           exp.splitWith.forEach(person => {
-            oweMap[person] += share;
+            oweMap[person] = (oweMap[person] || 0) + share;
           });
         });
 
         const netMap = {
-          Janice: paidMap.Janice - oweMap.Janice,
-          Carrie: paidMap.Carrie - oweMap.Carrie,
-          Kingsley: paidMap.Kingsley - oweMap.Kingsley
+          Janice: (paidMap.Janice || 0) - (oweMap.Janice || 0),
+          Carrie: (paidMap.Carrie || 0) - (oweMap.Carrie || 0),
+          Kingsley: (paidMap.Kingsley || 0) - (oweMap.Kingsley || 0)
         };
 
-        // 計算最佳轉帳方案 (誰給誰多少錢)
-        const creditors = []; // 應收款 (+)
-        const debtors = [];   // 應付款 (-)
+        const creditors = [];
+        const debtors = [];
 
         Object.keys(netMap).forEach(person => {
           const val = Math.round(netMap[person] * 100) / 100;
@@ -230,7 +300,6 @@
         return { paidMap, oweMap, netMap, transfers };
       }, [currentWeekExpenses]);
 
-      // --- 確認消帳邏輯 ---
       const handleTogglePaymentStatus = (transferId, actionType) => {
         const weekSettles = settlements[selectedWeekKey] || {};
         const currentStatus = weekSettles[transferId] || { payerPaid: false, receiverConfirmed: false };
@@ -246,86 +315,138 @@
         const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekSettles };
 
         setSettlements(updatedSettlements);
-        saveData(undefined, undefined, updatedSettlements);
+        saveData(undefined, undefined, updatedSettlements, undefined);
       };
 
-      const getRoommateObj = (id) => DEFAULT_ROOMMATES.find(r => r.id === id) || { name: id, emoji: '👤' };
+      const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
+      const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
 
       return (
         <div className="max-w-3xl mx-auto p-4 pb-24">
-          {/* 頂部 Header */}
-          <header className="bg-white rounded-2xl p-5 shadow-sm mb-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4 border border-slate-200">
+          {/* 可愛頂部 Header */}
+          <header className="bg-white rounded-3xl p-6 shadow-sm mb-5 border-2 border-rose-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-                <span>🇬🇧</span> 室友買菜與煮飯帳本
-              </h1>
-              <p className="text-xs text-slate-500 mt-1">Janice • Carrie • Kingsley 專屬小額採購按週分攤</p>
+              <div className="flex items-center gap-2">
+                <span className="text-3xl">🏡</span>
+                <h1 className="text-2xl font-bold text-slate-800 tracking-tight">室友溫馨採購帳本</h1>
+              </div>
+              <p className="text-xs text-rose-500 font-medium mt-1">Janice • Carrie • Kingsley 買菜與晚餐記錄小幫手</p>
             </div>
 
-            {/* 當前使用者選擇器 */}
-            <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 flex items-center gap-2">
-              <span className="text-xs font-semibold text-slate-600">👤 目前你是：</span>
-              <div className="flex gap-1">
-                {DEFAULT_ROOMMATES.map(r => (
-                  <button
-                    key={r.id}
-                    onClick={() => setCurrentUser(r.id)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${
-                      currentUser === r.id 
-                        ? 'bg-emerald-600 text-white shadow-sm' 
-                        : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
-                    }`}
-                  >
-                    {r.emoji} {r.name}
-                  </button>
-                ))}
+            {/* Google 登入狀態與角色切換 */}
+            <div className="flex flex-col gap-2 items-end">
+              {/* Google 帳號顯示 */}
+              <div id="googleBtnContainer" className="flex items-center gap-2">
+                {googleUser ? (
+                  <div className="bg-rose-50 border border-rose-200 text-xs px-3 py-1.5 rounded-full flex items-center gap-2 text-rose-700 font-medium">
+                    <img src={googleUser.picture} className="w-5 h-5 rounded-full" />
+                    <span>{googleUser.name}</span>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* 切換目前角色 */}
+              <div className="bg-amber-50/80 p-2 rounded-2xl border border-amber-200 flex items-center gap-2">
+                <span className="text-xs font-bold text-amber-800">👤 目前操作：</span>
+                <div className="flex gap-1">
+                  {roommates.map(r => (
+                    <button
+                      key={r.id}
+                      onClick={() => setCurrentUser(r.id)}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
+                        currentUser === r.id 
+                          ? 'bg-rose-500 text-white shadow-md' 
+                          : 'bg-white text-slate-600 hover:bg-rose-100 border border-slate-200'
+                      }`}
+                    >
+                      <span>{r.emoji}</span>
+                      <span>{r.name}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           </header>
 
-          {/* 週選擇與導覽列 */}
-          <div className="bg-white rounded-2xl p-4 shadow-sm mb-5 border border-slate-200">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <i className="fa-solid fa-calendar-week text-emerald-600 text-lg"></i>
-                <span className="font-bold text-slate-700">選擇計算週期：</span>
-              </div>
-              <select
-                value={selectedWeekKey}
-                onChange={(e) => setSelectedWeekKey(e.target.value)}
-                className="bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              >
-                {weeksList.map(w => (
-                  <option key={w.key} value={w.key}>{w.label}</option>
-                ))}
-              </select>
+          {/* 室友自選 Emoji 頭像專區 */}
+          <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+              <span className="text-base">🎨</span>
+              <span>自訂個人頭像 Emoji：</span>
+            </div>
+            <div className="flex gap-3">
+              {roommates.map(r => (
+                <div key={r.id} className="relative">
+                  <button
+                    onClick={() => setShowEmojiPickerFor(showEmojiPickerFor === r.id ? null : r.id)}
+                    className="bg-rose-50 hover:bg-rose-100 border border-rose-200 px-3 py-1.5 rounded-2xl text-xs font-bold flex items-center gap-1 transition"
+                    title="點擊更換頭像"
+                  >
+                    <span className="text-lg">{r.emoji}</span>
+                    <span className="text-slate-700">{r.name}</span>
+                    <i className="fa-solid fa-pen text-[10px] text-rose-400"></i>
+                  </button>
+
+                  {/* Popover Emoji Picker */}
+                  {showEmojiPickerFor === r.id && (
+                    <div className="absolute right-0 top-10 bg-white p-3 rounded-2xl shadow-xl border-2 border-rose-200 z-50 w-52 grid grid-cols-4 gap-2">
+                      {EMOJI_PALETTE.map(emoji => (
+                        <button
+                          key={emoji}
+                          onClick={() => handleUpdateEmoji(r.id, emoji)}
+                          className="text-2xl hover:scale-125 transition p-1 text-center"
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
 
-          {/* Tab 頁籤切換 */}
-          <div className="flex bg-slate-200/80 p-1 rounded-2xl mb-5 text-sm font-semibold">
+          {/* 週選擇與導覽列 */}
+          <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <i className="fa-solid fa-calendar-heart text-rose-500 text-lg"></i>
+              <span className="font-bold text-slate-700 text-sm">採購與結算週期：</span>
+            </div>
+            <select
+              value={selectedWeekKey}
+              onChange={(e) => setSelectedWeekKey(e.target.value)}
+              className="bg-rose-50/50 border-2 border-rose-200 rounded-2xl px-4 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-400"
+            >
+              {weeksList.map(w => (
+                <option key={w.key} value={w.key}>{w.label}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* TAB 頁籤 */}
+          <div className="flex bg-rose-100/60 p-1.5 rounded-3xl mb-5 text-sm font-bold">
             <button
               onClick={() => setActiveTab('expenses')}
-              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
-                activeTab === 'expenses' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'expenses' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
-              <i className="fa-solid fa-cart-shopping"></i>
+              <i className="fa-solid fa-basket-shopping"></i>
               採購明細
             </button>
             <button
               onClick={() => setActiveTab('dinner')}
-              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
-                activeTab === 'dinner' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'dinner' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               <i className="fa-solid fa-utensils"></i>
-              晚餐不回家吃登記
+              不回家吃登記
             </button>
             <button
               onClick={() => setActiveTab('settlement')}
-              className={`flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 ${
-                activeTab === 'settlement' ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+                activeTab === 'settlement' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               <i className="fa-solid fa-calculator"></i>
@@ -333,76 +454,77 @@
             </button>
           </div>
 
-          {/* TAB 1: 採購紀錄與新增 */}
+          {/* TAB 1: 採購明細 */}
           {activeTab === 'expenses' && (
             <div className="space-y-5">
-              {/* 新增費用表單 */}
-              <form onSubmit={handleAddExpense} className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+              {/* 新增表單 */}
+              <form onSubmit={handleAddExpense} className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
                 <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
-                  <i className="fa-solid fa-plus-circle text-emerald-600"></i>
-                  新增採購明細
+                  <span className="text-xl">🍓</span>
+                  新增採購紀錄
                 </h2>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">物品/超市名稱</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">物品 / 超市名稱</label>
                     <input
                       type="text"
-                      placeholder="例：Sainsbury's 蔬菜雞胸肉"
+                      placeholder="例：Waitrose 牛排 & 鮮奶"
                       value={itemTitle}
                       onChange={(e) => setItemTitle(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">總金額 (£ 英鎊)</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">總金額 (£ 英鎊)</label>
                     <input
                       type="number"
                       step="0.01"
                       placeholder="0.00"
                       value={itemAmount}
                       onChange={(e) => setItemAmount(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold text-rose-600 focus:outline-none focus:border-rose-400"
                     />
                   </div>
 
+                  {/* 物品類別選擇 */}
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">採購日期</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">物品分類</label>
+                    <select
+                      value={itemCategory}
+                      onChange={(e) => setItemCategory(e.target.value)}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold focus:outline-none focus:border-rose-400"
+                    >
+                      {CATEGORIES.map(c => (
+                        <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">採購日期</label>
                     <input
                       type="date"
                       value={itemDate}
                       onChange={(e) => setItemDate(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
                     />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">先行先付人 (Payer)</label>
-                    <select
-                      value={itemPayer}
-                      onChange={(e) => setItemPayer(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    >
-                      {DEFAULT_ROOMMATES.map(r => (
-                        <option key={r.id} value={r.id}>{r.emoji} {r.name}</option>
-                      ))}
-                    </select>
                   </div>
                 </div>
 
                 {/* 分攤成員 */}
                 <div className="mt-4">
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">分攤成員 (預設 3 人均分)</label>
-                  <div className="flex gap-3">
-                    {DEFAULT_ROOMMATES.map(r => {
+                  <label className="block text-xs font-bold text-slate-600 mb-2">分攤成員 (預設均分)</label>
+                  <div className="flex gap-2">
+                    {roommates.map(r => {
                       const isChecked = itemSplit.includes(r.id);
                       return (
                         <label
                           key={r.id}
-                          className={`flex-1 flex items-center justify-center gap-2 p-2.5 rounded-xl cursor-pointer border transition text-sm font-medium ${
+                          className={`flex-1 flex items-center justify-center gap-2 p-2.5 rounded-2xl cursor-pointer border-2 transition text-xs font-bold ${
                             isChecked 
-                              ? 'bg-emerald-50 border-emerald-500 text-emerald-800' 
+                              ? 'bg-rose-50 border-rose-400 text-rose-700' 
                               : 'bg-slate-50 border-slate-200 text-slate-400'
                           }`}
                         >
@@ -411,7 +533,7 @@
                             checked={isChecked}
                             onChange={() => {
                               if (isChecked) {
-                                if (itemSplit.length === 1) return alert('至少需有一人分攤！');
+                                if (itemSplit.length === 1) return alert('至少需要一位分攤成員！');
                                 setItemSplit(itemSplit.filter(id => id !== r.id));
                               } else {
                                 setItemSplit([...itemSplit, r.id]);
@@ -419,7 +541,7 @@
                             }}
                             className="hidden"
                           />
-                          <span>{r.emoji}</span>
+                          <span className="text-base">{r.emoji}</span>
                           <span>{r.name}</span>
                         </label>
                       );
@@ -427,78 +549,94 @@
                   </div>
                 </div>
 
-                {/* 登記人標示 */}
-                <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-                  <span>📝 登記人：<strong className="text-slate-700">{getRoommateObj(registeredBy).emoji} {registeredBy}</strong></span>
+                <div className="mt-5 pt-3 border-t border-rose-100 flex items-center justify-between">
+                  <span className="text-xs text-slate-500 font-medium">
+                    📝 登記人：<strong className="text-slate-800">{getRoommateObj(currentUser).emoji} {currentUser}</strong>
+                  </span>
                   <button
                     type="submit"
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-2.5 rounded-xl shadow-md transition flex items-center gap-2 text-sm"
+                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-6 py-2.5 rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-2 text-sm"
                   >
-                    <i className="fa-solid fa-check"></i>
-                    確認新增
+                    <i className="fa-solid fa-heart"></i>
+                    確認加入
                   </button>
                 </div>
               </form>
 
               {/* 明細列表 */}
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+              <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                    <i className="fa-solid fa-list-check text-emerald-600"></i>
-                    當週採購紀錄 ({currentWeekExpenses.length} 筆)
+                    <span className="text-xl">🧺</span>
+                    當週採購小記 ({currentWeekExpenses.length} 筆)
                   </h3>
-                  <span className="text-xs bg-slate-100 text-slate-600 font-semibold px-2.5 py-1 rounded-lg">
-                    當週總額：£{currentWeekExpenses.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}
+                  <span className="text-xs bg-rose-100 text-rose-700 font-extrabold px-3 py-1 rounded-full">
+                    總共 £{currentWeekExpenses.reduce((sum, e) => sum + e.amount, 0).toFixed(2)}
                   </span>
                 </div>
 
                 {currentWeekExpenses.length === 0 ? (
                   <div className="text-center py-10 text-slate-400 text-sm">
-                    <i className="fa-solid fa-basket-shopping text-3xl mb-2 block"></i>
-                    本週尚無採購紀錄，點擊上方表單新增第一筆吧！
+                    <div className="text-4xl mb-2">🥑</div>
+                    本週還沒有採購紀錄，快新增第一筆吧！
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    {currentWeekExpenses.map(exp => (
-                      <div key={exp.id} className="p-3.5 rounded-xl border border-slate-100 hover:border-slate-300 bg-slate-50/50 flex items-center justify-between transition">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-slate-800">{exp.title}</span>
-                            <span className="text-emerald-700 font-extrabold text-base">£{exp.amount.toFixed(2)}</span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-1">
-                            <span>📅 {exp.date}</span>
-                            <span>💳 由 {getRoommateObj(exp.payer).emoji} {exp.payer} 付款</span>
-                            <span>👥 分攤：{exp.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
-                            <span className="text-slate-400">📝 登記人：{getRoommateObj(exp.registeredBy || exp.payer).name}</span>
-                          </div>
-                        </div>
+                    {currentWeekExpenses.map(exp => {
+                      const cat = getCategoryObj(exp.category);
+                      const isMyRecord = exp.registeredBy === currentUser;
 
-                        <button
-                          onClick={() => handleDeleteExpense(exp.id)}
-                          className="text-slate-300 hover:text-red-500 p-2 transition"
-                          title="刪除此筆紀錄"
-                        >
-                          <i className="fa-solid fa-trash-can"></i>
-                        </button>
-                      </div>
-                    ))}
+                      return (
+                        <div key={exp.id} className="cute-card p-4 rounded-2xl border-2 border-rose-50 bg-rose-50/20 flex items-center justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              {/* 類別標籤 */}
+                              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${cat.color}`}>
+                                {cat.emoji} {cat.name}
+                              </span>
+                              <span className="font-bold text-slate-800">{exp.title}</span>
+                              <span className="text-rose-600 font-extrabold text-base">£{exp.amount.toFixed(2)}</span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-2">
+                              <span>📅 {exp.date}</span>
+                              <span>💳 {getRoommateObj(exp.payer).emoji} {exp.payer} 先付</span>
+                              <span>👥 分攤：{exp.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
+                              <span className="text-rose-400 font-medium">📝 登記人：{getRoommateObj(exp.registeredBy).name}</span>
+                            </div>
+                          </div>
+
+                          {/* 僅登記人可刪除按鈕 */}
+                          {isMyRecord ? (
+                            <button
+                              onClick={() => handleDeleteExpense(exp)}
+                              className="text-slate-300 hover:text-rose-500 p-2 transition"
+                              title="刪除紀錄"
+                            >
+                              <i className="fa-solid fa-trash-can"></i>
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-300 font-medium bg-slate-100 px-2 py-1 rounded-lg" title="僅登記人可刪除">
+                              🔒 僅登記人
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
             </div>
           )}
 
-          {/* TAB 2: 晚餐不回家吃登記 */}
+          {/* TAB 2: 不回家吃登記 */}
           {activeTab === 'dinner' && (
-            <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
-              <h2 className="text-base font-bold text-slate-800 mb-2 flex items-center gap-2">
-                <i className="fa-solid fa-utensils text-emerald-600"></i>
+            <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
+              <h2 className="text-base font-bold text-slate-800 mb-1 flex items-center gap-2">
+                <span className="text-xl">🌙</span>
                 本週晚餐「不回家吃」登記表
               </h2>
-              <p className="text-xs text-slate-500 mb-4">
-                勾選「❌ 不回家吃」後，系統新增當天採購明細時會**自動將該室友排除分攤**！
-              </p>
+              <p className="text-xs text-slate-400 mb-4">點擊切換狀態，登記不回家吃會自動排除當日採購分攤！</p>
 
               <div className="space-y-3">
                 {[0, 1, 2, 3, 4, 5, 6].map(offset => {
@@ -509,19 +647,17 @@
                   const absentList = dinnerAbsent[dateStr] || [];
 
                   return (
-                    <div key={dateStr} className="p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-slate-700">{dateStr} ({dayNames[dateObj.getDay()]})</span>
-                      </div>
+                    <div key={dateStr} className="p-3.5 bg-rose-50/30 rounded-2xl border border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <span className="font-bold text-xs text-slate-700">{dateStr} ({dayNames[dateObj.getDay()]})</span>
 
                       <div className="flex gap-2">
-                        {DEFAULT_ROOMMATES.map(r => {
+                        {roommates.map(r => {
                           const isAbsent = absentList.includes(r.id);
                           return (
                             <button
                               key={r.id}
                               onClick={() => toggleDinnerAbsent(dateStr, r.id)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 border ${
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border ${
                                 isAbsent 
                                   ? 'bg-rose-100 text-rose-700 border-rose-300' 
                                   : 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -544,19 +680,19 @@
           {/* TAB 3: 本週結算與消帳 */}
           {activeTab === 'settlement' && (
             <div className="space-y-5">
-              {/* 三人收支摘要卡片 */}
+              {/* 3人收支卡片 */}
               <div className="grid grid-cols-3 gap-3">
-                {DEFAULT_ROOMMATES.map(r => {
+                {roommates.map(r => {
                   const paid = weeklyCalculation.paidMap[r.id] || 0;
                   const owe = weeklyCalculation.oweMap[r.id] || 0;
                   const net = weeklyCalculation.netMap[r.id] || 0;
 
                   return (
-                    <div key={r.id} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 text-center">
-                      <div className="text-2xl mb-1">{r.emoji}</div>
+                    <div key={r.id} className="bg-white p-4 rounded-3xl shadow-sm border-2 border-rose-100 text-center">
+                      <div className="text-3xl mb-1">{r.emoji}</div>
                       <div className="font-bold text-slate-800 text-sm">{r.name}</div>
-                      <div className="text-xs text-slate-500 mt-1">實付: £{paid.toFixed(2)}</div>
-                      <div className="text-xs text-slate-500">應付: £{owe.toFixed(2)}</div>
+                      <div className="text-[11px] text-slate-400 mt-1">實付 £{paid.toFixed(2)}</div>
+                      <div className="text-[11px] text-slate-400">應付 £{owe.toFixed(2)}</div>
                       
                       <div className={`mt-2 pt-2 border-t text-sm font-extrabold ${
                         net > 0.009 ? 'text-emerald-600' : net < -0.009 ? 'text-rose-600' : 'text-slate-400'
@@ -568,16 +704,16 @@
                 })}
               </div>
 
-              {/* 轉帳與雙方確認消帳清單 */}
-              <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
-                <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2">
-                  <i className="fa-solid fa-money-bill-transfer text-emerald-600"></i>
-                  最佳化清算方案與雙方消帳確認
+              {/* 轉帳與消帳清單 */}
+              <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
+                <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <span className="text-xl">💰</span>
+                  轉帳清單與雙方消帳確認
                 </h3>
 
                 {weeklyCalculation.transfers.length === 0 ? (
-                  <div className="text-center py-8 text-emerald-600 font-medium text-sm">
-                    🎉 本週帳目平衡，不需要進行任何轉帳！
+                  <div className="text-center py-8 text-emerald-600 font-bold text-sm">
+                    🎉 本週帳目完美的平衡，不需要互相轉帳！
                   </div>
                 ) : (
                   <div className="space-y-4">
@@ -590,59 +726,56 @@
                       const toObj = getRoommateObj(tr.to);
 
                       return (
-                        <div key={tr.id} className={`p-4 rounded-xl border transition ${
-                          isCleared ? 'bg-emerald-50/60 border-emerald-300' : 'bg-slate-50 border-slate-200'
+                        <div key={tr.id} className={`p-4 rounded-2xl border-2 transition ${
+                          isCleared ? 'bg-emerald-50/50 border-emerald-300' : 'bg-slate-50 border-slate-200'
                         }`}>
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
-                            <div className="flex items-center gap-2 font-bold text-slate-800 text-base">
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm">
                               <span>{fromObj.emoji} {fromObj.name}</span>
-                              <i className="fa-solid fa-arrow-right text-slate-400 text-xs"></i>
+                              <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
                               <span>{toObj.emoji} {toObj.name}</span>
-                              <span className="text-emerald-700 font-extrabold ml-1">£{tr.amount.toFixed(2)}</span>
+                              <span className="text-rose-600 font-extrabold text-base ml-1">£{tr.amount.toFixed(2)}</span>
                             </div>
 
-                            {/* 狀態標籤 */}
                             <div>
                               {isCleared ? (
-                                <span className="bg-emerald-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-sm">
-                                  <i className="fa-solid fa-circle-check mr-1"></i> 已雙方消帳
+                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">
+                                  ✓ 已消帳完成
                                 </span>
                               ) : (
                                 <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
-                                  ⏳ 待完成結算
+                                  ⏳ 待結算
                                 </span>
                               )}
                             </div>
                           </div>
 
-                          {/* 雙方確認按鈕區域 */}
+                          {/* 雙方確認區域 */}
                           <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
-                            {/* 付款方按鈕 */}
                             <button
                               onClick={() => handleTogglePaymentStatus(tr.id, 'payer_pay')}
-                              className={`p-2 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition ${
+                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
                                 status.payerPaid
                                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-100'
+                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
                               }`}
                             >
                               <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
-                              <span>付款方 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '點擊標記已付款'}</span>
+                              <span>付款方 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '點擊標記付款'}</span>
                             </button>
 
-                            {/* 收款方確認消帳按鈕 */}
                             <button
                               onClick={() => handleTogglePaymentStatus(tr.id, 'receiver_confirm')}
-                              className={`p-2 rounded-lg font-semibold flex items-center justify-center gap-1.5 transition ${
+                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
                                 status.receiverConfirmed
                                   ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                                   : status.payerPaid 
-                                    ? 'bg-emerald-600 text-white shadow hover:bg-emerald-700' 
+                                    ? 'bg-rose-500 text-white shadow hover:bg-rose-600' 
                                     : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
                               }`}
                             >
                               <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
-                              <span>收款方 ({toObj.name})：{status.receiverConfirmed ? '已確認收款 (已消帳)' : '確認收到並消帳'}</span>
+                              <span>收款方 ({toObj.name})：{status.receiverConfirmed ? '已確認收款' : '確認收到並消帳'}</span>
                             </button>
                           </div>
                         </div>
