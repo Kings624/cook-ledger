@@ -27,15 +27,26 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
 
-    // 204室專屬雲端同步伺服器 (JSONBlob 實時資料庫)
-    const CLOUD_SYNC_ENDPOINT = 'https://jsonblob.com/api/jsonBlob/1281893821098231098';
-    const PERMANENT_STORAGE_KEY = 'ROOM204_LOCAL_CACHE_V4';
+    const PERMANENT_STORAGE_KEY = 'ROOM204_LOCAL_CACHE_V5';
+    const CLOUD_ROOM_ID_KEY = 'ROOM204_CLOUD_ROOM_ID';
 
+    // 本地日期格式化工具 (避免 UTC 時區漂移)
     function formatLocalDate(d = new Date()) {
       const year = d.getFullYear();
       const month = String(d.getMonth() + 1).padStart(2, '0');
       const day = String(d.getDate()).padStart(2, '0');
       return `${year}-${month}-${day}`;
+    }
+
+    // 從 URL 或 LocalStorage 獲取 Room ID
+    function getInitialRoomId() {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room') || urlParams.get('sync');
+      if (roomParam) {
+        localStorage.setItem(CLOUD_ROOM_ID_KEY, roomParam);
+        return roomParam;
+      }
+      return localStorage.getItem(CLOUD_ROOM_ID_KEY) || null;
     }
 
     const CATEGORIES = [
@@ -84,7 +95,8 @@
 
     function App() {
       const [currentNowDate, setCurrentNowDate] = useState(new Date());
-      const [syncStatus, setSyncStatus] = useState('online'); // 'online' | 'syncing' | 'error'
+      const [roomId, setRoomId] = useState(getInitialRoomId());
+      const [syncStatus, setSyncStatus] = useState('syncing'); // 'online' | 'syncing' | 'error'
       const [lastSyncTime, setLastSyncTime] = useState(null);
 
       const weeksList = useMemo(() => getPast13Weeks(currentNowDate), [currentNowDate]);
@@ -100,7 +112,10 @@
 
       const [showLoginModal, setShowLoginModal] = useState(false);
       const [showBackupModal, setShowBackupModal] = useState(false);
+      const [showRoomModal, setShowRoomModal] = useState(false);
+      
       const [backupJsonInput, setBackupJsonInput] = useState('');
+      const [inputRoomId, setInputRoomId] = useState('');
 
       const [bindTarget, setBindTarget] = useState('Janice');
       const [loginEmailInput, setLoginEmailInput] = useState('');
@@ -109,13 +124,63 @@
       const [dinnerAbsent, setDinnerAbsent] = useState({});
       const [settlements, setSettlements] = useState({});
 
-      // 雲端讀取函式
-      const fetchFromCloud = async () => {
+      // 在雲端建立新房間 (POST)
+      const createNewCloudRoom = async (initialData) => {
+        setSyncStatus('syncing');
+        const defaultPayload = initialData || {
+          expenses: [],
+          dinnerAbsent: {},
+          settlements: {},
+          roommates: INITIAL_ROOMMATES
+        };
+
+        try {
+          const res = await fetch('https://jsonblob.com/api/jsonBlob', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify(defaultPayload)
+          });
+
+          if (res.ok) {
+            const location = res.headers.get('Location');
+            if (location) {
+              const newId = location.split('/').pop();
+              setRoomId(newId);
+              localStorage.setItem(CLOUD_ROOM_ID_KEY, newId);
+              setSyncStatus('online');
+              setLastSyncTime(new Date().toLocaleTimeString());
+              
+              // 更新 URL 不重新整理
+              const newUrl = `${window.location.origin}${window.location.pathname}?room=${newId}`;
+              window.history.replaceState({ path: newUrl }, '', newUrl);
+              return newId;
+            }
+          }
+        } catch (e) {
+          console.error('建立雲端房間失敗:', e);
+        }
+        setSyncStatus('error');
+        return null;
+      };
+
+      // 雲端讀取 (GET)
+      const fetchFromCloud = async (targetRoomId) => {
+        const idToUse = targetRoomId || roomId;
+        if (!idToUse) {
+          // 如果完全沒有 Room ID，自動建立全新雲端房間
+          await createNewCloudRoom();
+          return;
+        }
+
         setSyncStatus('syncing');
         try {
-          const res = await fetch(CLOUD_SYNC_ENDPOINT, {
+          const res = await fetch(`https://jsonblob.com/api/jsonBlob/${idToUse}`, {
             headers: { 'Accept': 'application/json' }
           });
+
           if (res.ok) {
             const parsed = await res.json();
             if (parsed) {
@@ -123,21 +188,29 @@
               if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
               if (parsed.settlements) setSettlements(parsed.settlements);
               if (parsed.roommates) setRoommates(parsed.roommates);
+              
               setSyncStatus('online');
               setLastSyncTime(new Date().toLocaleTimeString());
               localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(parsed));
             }
+          } else if (res.status === 404) {
+            // 該 Room ID 不存在/已過期，自動建立新房間
+            console.warn('雲端房間 404，正在為您自動建立新雲端房間...');
+            const localCache = localStorage.getItem(PERMANENT_STORAGE_KEY);
+            const initialData = localCache ? JSON.parse(localCache) : null;
+            await createNewCloudRoom(initialData);
           } else {
             setSyncStatus('error');
           }
         } catch (e) {
-          console.log('雲端讀取暫時失效:', e);
+          console.log('雲端讀取異常:', e);
           setSyncStatus('error');
         }
       };
 
       // 初始化連線與 4 秒自動輪詢
       useEffect(() => {
+        // 先載入本機快取
         const localData = localStorage.getItem(PERMANENT_STORAGE_KEY);
         if (localData) {
           try {
@@ -150,16 +223,18 @@
           } catch(e) {}
         }
 
-        fetchFromCloud();
+        // 開始從雲端讀取
+        fetchFromCloud(roomId);
 
+        // 每 4 秒自動同步最新帳目
         const timer = setInterval(() => {
-          fetchFromCloud();
+          fetchFromCloud(roomId);
         }, 4000);
 
         return () => clearInterval(timer);
-      }, []);
+      }, [roomId]);
 
-      // 推送寫入雲端伺服器
+      // 推送寫入雲端 (PUT)
       const saveData = async (newExp, newDin, newSet, newRm, newEmail) => {
         const payload = {
           expenses: newExp !== undefined ? newExp : expenses,
@@ -169,11 +244,18 @@
           loggedInUserEmail: newEmail !== undefined ? newEmail : loggedInUserEmail
         };
 
+        // 本機快照
         localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
         setSyncStatus('syncing');
 
+        let currentRoom = roomId;
+        if (!currentRoom) {
+          currentRoom = await createNewCloudRoom(payload);
+          if (!currentRoom) return;
+        }
+
         try {
-          const res = await fetch(CLOUD_SYNC_ENDPOINT, {
+          const res = await fetch(`https://jsonblob.com/api/jsonBlob/${currentRoom}`, {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -181,9 +263,12 @@
             },
             body: JSON.stringify(payload)
           });
+
           if (res.ok) {
             setSyncStatus('online');
             setLastSyncTime(new Date().toLocaleTimeString());
+          } else if (res.status === 404) {
+            await createNewCloudRoom(payload);
           } else {
             setSyncStatus('error');
           }
@@ -193,6 +278,34 @@
         }
       };
 
+      // 複製連線邀請連結
+      const handleCopyShareLink = () => {
+        if (!roomId) {
+          alert('正在建立雲端房間，請稍後再試！');
+          return;
+        }
+        const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+        navigator.clipboard.writeText(shareUrl);
+        alert(`🔗 專屬連線網址已複製！\n\n發送給室友即可同步同一個帳本：\n${shareUrl}`);
+      };
+
+      // 手動切換房間 ID
+      const handleSwitchRoomId = () => {
+        if (!inputRoomId.trim()) return;
+        const cleanId = inputRoomId.trim();
+        setRoomId(cleanId);
+        localStorage.setItem(CLOUD_ROOM_ID_KEY, cleanId);
+        setShowRoomModal(false);
+        setInputRoomId('');
+        
+        const newUrl = `${window.location.origin}${window.location.pathname}?room=${cleanId}`;
+        window.history.replaceState({ path: newUrl }, '', newUrl);
+
+        fetchFromCloud(cleanId);
+        alert(`✅ 已成功連線至房間代碼：${cleanId}`);
+      };
+
+      // 驗證 User Email & 室友身分
       useEffect(() => {
         if (!loggedInUserEmail) {
           setCurrentUser(null);
@@ -257,7 +370,7 @@
           saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates, undefined);
           setShowBackupModal(false);
           setBackupJsonInput('');
-          alert('✅ 數據已成功匯入並同步至所有室友手機！');
+          alert('✅ 數據已成功匯入並同步至雲端！');
         } catch(e) {
           alert('❌ 格式錯誤，請貼上正確的 JSON 數據。');
         }
@@ -328,7 +441,7 @@
 
         setItemTitle('');
         setItemAmount('');
-        alert('✨ 成功加入採購明細！雲端已同步');
+        alert('✨ 成功加入採購明細！已即時同步');
       };
 
       const handleDeleteExpense = (exp) => {
@@ -478,32 +591,47 @@
           {/* Header */}
           <header className="bg-white rounded-3xl p-6 shadow-sm mb-5 border-2 border-rose-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-3xl">🏠</span>
                 <h1 className="text-2xl font-bold text-slate-800 tracking-tight">204室小帳本</h1>
                 
-                {/* 雲端連線狀態燈號 */}
-                <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
-                  syncStatus === 'syncing' 
-                    ? 'bg-amber-100 text-amber-800' 
-                    : syncStatus === 'online'
-                      ? 'bg-emerald-100 text-emerald-800'
-                      : 'bg-rose-100 text-rose-800'
-                }`}>
+                {/* 雲端連線狀態 */}
+                <button
+                  onClick={() => setShowRoomModal(true)}
+                  className={`text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1 transition shadow-sm ${
+                    syncStatus === 'syncing' 
+                      ? 'bg-amber-100 text-amber-800 border border-amber-300' 
+                      : syncStatus === 'online'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200'
+                        : 'bg-rose-100 text-rose-800 border border-rose-300'
+                  }`}
+                  title="點擊設定或切換房間代碼"
+                >
                   <i className={`fa-solid ${
                     syncStatus === 'syncing' ? 'fa-spinner fa-spin' : syncStatus === 'online' ? 'fa-cloud-check' : 'fa-triangle-exclamation'
                   }`}></i>
                   <span>
-                    {syncStatus === 'syncing' ? '雲端同步中...' : syncStatus === 'online' ? `雲端即時連線 (${lastSyncTime || '即時'})` : '離線備援模式'}
+                    {syncStatus === 'syncing' ? '雲端同步中...' : syncStatus === 'online' ? `雲端即時連線 (${lastSyncTime || '即時'})` : '連線重試中'}
                   </span>
-                </span>
+                  <i className="fa-solid fa-gear text-[9px] ml-0.5"></i>
+                </button>
               </div>
+
               <p className="text-xs text-rose-500 font-medium mt-1">Janice • Carrie • Kingsley 買菜與晚餐記錄小幫手</p>
             </div>
 
-            {/* 帳號登入與備份 */}
+            {/* 帳號登入 & 連線分享 */}
             <div className="flex flex-col gap-2 items-start md:items-end">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={handleCopyShareLink}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold px-3 py-1.5 rounded-full text-xs shadow transition flex items-center gap-1.5"
+                  title="複製連結發給室友，打開即自動連線"
+                >
+                  <i className="fa-solid fa-share-nodes"></i>
+                  <span>分享連結給室友</span>
+                </button>
+
                 <button
                   onClick={() => setShowBackupModal(true)}
                   className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-1.5 rounded-full text-xs transition flex items-center gap-1.5"
@@ -513,7 +641,7 @@
                 </button>
 
                 {currentUser ? (
-                  <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs px-3.5 py-1.5 rounded-full flex items-center gap-2 font-bold shadow-sm">
+                  <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs px-3 py-1.5 rounded-full flex items-center gap-2 font-bold shadow-sm">
                     <span className="text-base">{currentRmUserObj.emoji}</span>
                     <span>{currentUser} ({loggedInUserEmail})</span>
                     <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600 ml-1" title="登出">
@@ -523,15 +651,15 @@
                 ) : (
                   <button
                     onClick={() => setShowLoginModal(true)}
-                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-4 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-md transition"
+                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-3.5 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-md transition"
                   >
                     <i className="fa-brands fa-google"></i>
-                    <span>登入 Google 驗證身份</span>
+                    <span>登入身份</span>
                   </button>
                 )}
               </div>
 
-              <div className="bg-amber-50/80 px-3 py-1.5 rounded-2xl border border-amber-200 flex items-center gap-2 text-xs">
+              <div className="bg-amber-50/80 px-3 py-1 rounded-2xl border border-amber-200 flex items-center gap-2 text-xs">
                 <span className="font-bold text-amber-800">👤 目前身份：</span>
                 {currentUser ? (
                   <span className="font-bold text-emerald-700">🔒 已鎖定為 {currentRmUserObj.emoji} {currentUser}</span>
@@ -1038,7 +1166,7 @@
             </div>
           )}
 
-          {/* Modal */}
+          {/* Modal: Google 登入 */}
           {showLoginModal && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
@@ -1096,7 +1224,58 @@
             </div>
           )}
 
-          {/* Backup Modal */}
+          {/* Modal: 房間代碼設定 / 分享 */}
+          {showRoomModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-cloud text-rose-500"></i>
+                    雲端房間連線設定
+                  </h3>
+                  <button onClick={() => setShowRoomModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div className="bg-rose-50 p-3 rounded-2xl border border-rose-200">
+                    <div className="text-slate-500 font-medium">目前連線的房間代碼：</div>
+                    <div className="font-mono font-bold text-rose-700 text-sm break-all mt-0.5">
+                      {roomId || '建立中...'}
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleCopyShareLink}
+                    className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-2.5 rounded-2xl shadow transition flex items-center justify-center gap-2"
+                  >
+                    <i className="fa-solid fa-share-nodes"></i>
+                    一鍵複製邀請連結 (發給室友)
+                  </button>
+
+                  <div className="pt-2 border-t border-slate-200">
+                    <label className="block font-bold text-slate-600 mb-1">手動連線至室友的房間代碼：</label>
+                    <input
+                      type="text"
+                      placeholder="貼上室友給的房間代碼"
+                      value={inputRoomId}
+                      onChange={(e) => setInputRoomId(e.target.value)}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-rose-400"
+                    />
+                    <button
+                      onClick={handleSwitchRoomId}
+                      className="w-full bg-rose-500 hover:bg-rose-600 text-white font-bold py-2 rounded-2xl shadow transition text-xs mt-2"
+                    >
+                      切換至該房間
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 數據備份 */}
           {showBackupModal && (
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
               <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border-2 border-rose-100 space-y-4">
