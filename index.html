@@ -110,7 +110,6 @@
       const [backupJsonInput, setBackupJsonInput] = useState('');
 
       const [bindTarget, setBindTarget] = useState('Janice');
-      const [loginEmailInput, setLoginEmailInput] = useState('');
 
       const [expenses, setExpenses] = useState([]);
       const [dinnerAbsent, setDinnerAbsent] = useState({});
@@ -133,7 +132,6 @@
           try {
             const parsed = JSON.parse(localData);
             applyIncomingData(parsed);
-            if (parsed.loggedInUserEmail) setLoggedInUserEmail(parsed.loggedInUserEmail);
           } catch(e) {}
         }
 
@@ -186,6 +184,28 @@
         };
       }, []);
 
+      // 監聽 Supabase Auth (Google OAuth) 登入狀態
+      useEffect(() => {
+        if (!supabase) return;
+
+        supabase.auth.getSession().then(({ data }) => {
+          setLoggedInUserEmail(data.session?.user?.email ?? null);
+        });
+
+        const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+          setLoggedInUserEmail(session?.user?.email ?? null);
+        });
+
+        return () => authListener.subscription.unsubscribe();
+      }, []);
+
+      // Google 帳號已驗證但尚未綁定室友時，自動彈出綁定視窗
+      useEffect(() => {
+        if (loggedInUserEmail && !currentUser) {
+          setShowLoginModal(true);
+        }
+      }, [loggedInUserEmail, currentUser]);
+
       // 推送寫入 Supabase
       const saveData = async (newExp, newDin, newSet, newRm, newEmail) => {
         const payload = {
@@ -230,33 +250,41 @@
         }
       }, [loggedInUserEmail, roommates]);
 
-      const handleLoginAndBind = (email, roommateId) => {
-        if (!email || !email.includes('@')) {
-          alert('請輸入有效的 Google 電子郵件！');
+      const handleGoogleSignIn = async () => {
+        if (!supabase) {
+          alert('⚠️ Supabase 尚未設定，無法使用 Google 登入。');
           return;
         }
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: { redirectTo: window.location.href.split('#')[0].split('?')[0] }
+        });
+        if (error) alert(`❌ Google 登入失敗：${error.message}`);
+      };
 
-        const cleanEmail = email.trim().toLowerCase();
+      const handleLoginAndBind = (roommateId) => {
+        if (!loggedInUserEmail) return;
+
+        const cleanEmail = loggedInUserEmail.toLowerCase();
         const existing = roommates.find(r => r.googleEmail === cleanEmail && r.id !== roommateId);
         if (existing) {
           alert(`⚠️ 此 Google 帳號已被室友 【${existing.name}】 綁定，無法重複綁定！`);
           return;
         }
 
-        const updatedRoommates = roommates.map(r => 
+        const updatedRoommates = roommates.map(r =>
           r.id === roommateId ? { ...r, googleEmail: cleanEmail } : r
         );
 
         setRoommates(updatedRoommates);
-        setLoggedInUserEmail(cleanEmail);
         saveData(undefined, undefined, undefined, updatedRoommates, cleanEmail);
 
         setShowLoginModal(false);
-        setLoginEmailInput('');
-        alert(`🎉 登入成功！已驗證為室友 【${roommateId}】`);
+        alert(`🎉 綁定成功！已驗證為室友 【${roommateId}】`);
       };
 
-      const handleLogout = () => {
+      const handleLogout = async () => {
+        if (supabase) await supabase.auth.signOut();
         setLoggedInUserEmail(null);
         setCurrentUser(null);
         saveData(undefined, undefined, undefined, undefined, null);
@@ -1077,46 +1105,53 @@
                   </button>
                 </div>
 
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">請選擇你是哪位室友：</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {roommates.map(r => (
-                        <button
-                          key={r.id}
-                          type="button"
-                          onClick={() => setBindTarget(r.id)}
-                          className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
-                            bindTarget === r.id
-                              ? 'bg-rose-50 border-rose-500 text-rose-700'
-                              : 'bg-slate-50 border-slate-200 text-slate-600'
-                          }`}
-                        >
-                          <span className="text-lg">{r.emoji}</span>
-                          <span>{r.name}</span>
-                        </button>
-                      ))}
+                {!loggedInUserEmail ? (
+                  <div className="space-y-3">
+                    <p className="text-xs text-slate-500">請使用 Google 帳號登入，系統會自動驗證您的身份。</p>
+                    <button
+                      onClick={handleGoogleSignIn}
+                      className="w-full bg-white hover:bg-slate-50 border-2 border-slate-200 text-slate-700 font-bold py-2.5 rounded-2xl shadow-sm transition text-sm flex items-center justify-center gap-2"
+                    >
+                      <i className="fa-brands fa-google text-red-500"></i>
+                      使用 Google 帳號登入
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs px-3 py-2 rounded-2xl flex items-center gap-2">
+                      <i className="fa-solid fa-circle-check"></i>
+                      <span>已驗證 Google 帳號：<strong>{loggedInUserEmail}</strong></span>
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">Google 電子郵件 (Email)：</label>
-                    <input
-                      type="email"
-                      placeholder="your-name@gmail.com"
-                      value={loginEmailInput}
-                      onChange={(e) => setLoginEmailInput(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 mb-1">請選擇你是哪位室友：</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {roommates.map(r => (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => setBindTarget(r.id)}
+                            className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
+                              bindTarget === r.id
+                                ? 'bg-rose-50 border-rose-500 text-rose-700'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                            }`}
+                          >
+                            <span className="text-lg">{r.emoji}</span>
+                            <span>{r.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
 
-                  <button
-                    onClick={() => handleLoginAndBind(loginEmailInput, bindTarget)}
-                    className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
-                  >
-                    驗證並綁定登入
-                  </button>
-                </div>
+                    <button
+                      onClick={() => handleLoginAndBind(bindTarget)}
+                      className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
+                    >
+                      確認綁定為此室友
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
