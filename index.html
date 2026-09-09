@@ -37,6 +37,7 @@
     const supabase = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
     const DB_ROW_ID = 'room204';
     const PERMANENT_STORAGE_KEY = 'ROOM204_LOCAL_CACHE_V6';
+    const CURRENT_USER_STORAGE_KEY = 'ROOM204_CURRENT_USER';
 
     function formatLocalDate(d = new Date()) {
       const year = d.getFullYear();
@@ -62,9 +63,9 @@
     ];
 
     const INITIAL_ROOMMATES = [
-      { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳', googleEmail: null },
-      { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾', googleEmail: null },
-      { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', googleEmail: null }
+      { id: 'Janice', name: 'Janice', emoji: '👩🏻‍🍳', pin: null },
+      { id: 'Carrie', name: 'Carrie', emoji: '👩🏼‍🌾', pin: null },
+      { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', pin: null }
     ];
 
     function getPast13Weeks(baseDate = new Date()) {
@@ -99,7 +100,6 @@
       const [activeTab, setActiveTab] = useState('expenses');
       
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
-      const [loggedInUserEmail, setLoggedInUserEmail] = useState(null);
       const [currentUser, setCurrentUser] = useState(null);
 
       const [showEmojiPickerFor, setShowEmojiPickerFor] = useState(null);
@@ -110,7 +110,7 @@
       const [backupJsonInput, setBackupJsonInput] = useState('');
 
       const [bindTarget, setBindTarget] = useState('Janice');
-      const [loginEmailInput, setLoginEmailInput] = useState('');
+      const [pinInput, setPinInput] = useState('');
 
       const [expenses, setExpenses] = useState([]);
       const [dinnerAbsent, setDinnerAbsent] = useState({});
@@ -133,7 +133,6 @@
           try {
             const parsed = JSON.parse(localData);
             applyIncomingData(parsed);
-            if (parsed.loggedInUserEmail) setLoggedInUserEmail(parsed.loggedInUserEmail);
           } catch(e) {}
         }
 
@@ -186,14 +185,19 @@
         };
       }, []);
 
+      // 還原此裝置上次登入的身份（僅存於本機瀏覽器，不會同步給其他人）
+      useEffect(() => {
+        const savedUser = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
+        if (savedUser) setCurrentUser(savedUser);
+      }, []);
+
       // 推送寫入 Supabase
-      const saveData = async (newExp, newDin, newSet, newRm, newEmail) => {
+      const saveData = async (newExp, newDin, newSet, newRm) => {
         const payload = {
           expenses: newExp !== undefined ? newExp : expenses,
           dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
           settlements: newSet !== undefined ? newSet : settlements,
-          roommates: newRm !== undefined ? newRm : roommates,
-          loggedInUserEmail: newEmail !== undefined ? newEmail : loggedInUserEmail
+          roommates: newRm !== undefined ? newRm : roommates
         };
 
         localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
@@ -217,49 +221,37 @@
         }
       };
 
-      useEffect(() => {
-        if (!loggedInUserEmail) {
-          setCurrentUser(null);
+      const handlePinLogin = () => {
+        const target = roommates.find(r => r.id === bindTarget);
+        if (!target) return;
+
+        if (!/^\d{4,6}$/.test(pinInput)) {
+          alert('請輸入 4-6 位數字的 PIN 碼！');
           return;
         }
-        const matched = roommates.find(r => r.googleEmail && r.googleEmail.toLowerCase() === loggedInUserEmail.toLowerCase());
-        if (matched) {
-          setCurrentUser(matched.id);
+
+        if (target.pin) {
+          if (pinInput !== target.pin) {
+            alert('❌ PIN 碼錯誤，請再試一次！');
+            return;
+          }
         } else {
-          setCurrentUser(null);
-        }
-      }, [loggedInUserEmail, roommates]);
-
-      const handleLoginAndBind = (email, roommateId) => {
-        if (!email || !email.includes('@')) {
-          alert('請輸入有效的 Google 電子郵件！');
-          return;
+          const updatedRoommates = roommates.map(r =>
+            r.id === target.id ? { ...r, pin: pinInput } : r
+          );
+          setRoommates(updatedRoommates);
+          saveData(undefined, undefined, undefined, updatedRoommates);
         }
 
-        const cleanEmail = email.trim().toLowerCase();
-        const existing = roommates.find(r => r.googleEmail === cleanEmail && r.id !== roommateId);
-        if (existing) {
-          alert(`⚠️ 此 Google 帳號已被室友 【${existing.name}】 綁定，無法重複綁定！`);
-          return;
-        }
-
-        const updatedRoommates = roommates.map(r => 
-          r.id === roommateId ? { ...r, googleEmail: cleanEmail } : r
-        );
-
-        setRoommates(updatedRoommates);
-        setLoggedInUserEmail(cleanEmail);
-        saveData(undefined, undefined, undefined, updatedRoommates, cleanEmail);
-
+        setCurrentUser(target.id);
+        localStorage.setItem(CURRENT_USER_STORAGE_KEY, target.id);
         setShowLoginModal(false);
-        setLoginEmailInput('');
-        alert(`🎉 登入成功！已驗證為室友 【${roommateId}】`);
+        setPinInput('');
       };
 
       const handleLogout = () => {
-        setLoggedInUserEmail(null);
         setCurrentUser(null);
-        saveData(undefined, undefined, undefined, undefined, null);
+        localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
       };
 
       const handleExportBackup = () => {
@@ -278,7 +270,7 @@
           if (parsed.settlements) setSettlements(parsed.settlements);
           if (parsed.roommates) setRoommates(parsed.roommates);
 
-          saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates, undefined);
+          saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates);
           setShowBackupModal(false);
           setBackupJsonInput('');
           alert('✅ 數據已成功匯入並同步至 Supabase 雲端！');
@@ -291,7 +283,7 @@
         if (!newEmoji) return;
         const updated = roommates.map(r => r.id === personId ? { ...r, emoji: newEmoji } : r);
         setRoommates(updated);
-        saveData(undefined, undefined, undefined, updated, undefined);
+        saveData(undefined, undefined, undefined, updated);
         setShowEmojiPickerFor(null);
         setCustomEmojiInput('');
       };
@@ -324,7 +316,7 @@
         e.preventDefault();
 
         if (!currentUser) {
-          alert('🔒 權限限制：請先登入 Google 帳號！');
+          alert('🔒 權限限制：請先登入身份！');
           return;
         }
 
@@ -342,13 +334,12 @@
           date: itemDate,
           splitWith: itemSplit,
           registeredBy: currentUser,
-          registeredEmail: loggedInUserEmail,
           createdAt: new Date().toISOString()
         };
 
         const updated = [newEntry, ...expenses];
         setExpenses(updated);
-        saveData(updated, undefined, undefined, undefined, undefined);
+        saveData(updated, undefined, undefined, undefined);
 
         setItemTitle('');
         setItemAmount('');
@@ -357,7 +348,7 @@
 
       const handleDeleteExpense = (exp) => {
         if (!currentUser) {
-          alert('🔒 請先登入 Google 帳號！');
+          alert('🔒 請先登入身份！');
           return;
         }
 
@@ -369,13 +360,13 @@
         if (confirm(`確定要刪除「${exp.title}」這筆紀錄嗎？`)) {
           const updated = expenses.filter(e => e.id !== exp.id);
           setExpenses(updated);
-          saveData(updated, undefined, undefined, undefined, undefined);
+          saveData(updated, undefined, undefined, undefined);
         }
       };
 
       const toggleDinnerAbsent = (dateStr, personId) => {
         if (!currentUser) {
-          alert('🔒 請先登入 Google 帳號！');
+          alert('🔒 請先登入身份！');
           return;
         }
 
@@ -391,7 +382,7 @@
 
         const updatedDinner = { ...dinnerAbsent, [dateStr]: updatedList };
         setDinnerAbsent(updatedDinner);
-        saveData(undefined, updatedDinner, undefined, undefined, undefined);
+        saveData(undefined, updatedDinner, undefined, undefined);
       };
 
       const currentWeekObj = useMemo(() => {
@@ -461,7 +452,7 @@
 
       const handleTogglePaymentStatus = (tr, actionType) => {
         if (!currentUser) {
-          alert('🔒 請先登入 Google 帳號！');
+          alert('🔒 請先登入身份！');
           return;
         }
 
@@ -489,7 +480,7 @@
         const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekSettles };
 
         setSettlements(updatedSettlements);
-        saveData(undefined, undefined, updatedSettlements, undefined, undefined);
+        saveData(undefined, undefined, updatedSettlements, undefined);
       };
 
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
@@ -540,7 +531,7 @@
                 {currentUser ? (
                   <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs px-3 py-1.5 rounded-full flex items-center gap-2 font-bold shadow-sm">
                     <span className="text-base">{currentRmUserObj.emoji}</span>
-                    <span>{currentUser} ({loggedInUserEmail})</span>
+                    <span>{currentUser}</span>
                     <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600 ml-1" title="登出">
                       <i className="fa-solid fa-right-from-bracket"></i>
                     </button>
@@ -550,7 +541,7 @@
                     onClick={() => setShowLoginModal(true)}
                     className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-3.5 py-1.5 rounded-full text-xs flex items-center gap-2 shadow-md transition"
                   >
-                    <i className="fa-brands fa-google"></i>
+                    <i className="fa-solid fa-key"></i>
                     <span>登入身份</span>
                   </button>
                 )}
@@ -571,7 +562,7 @@
             <div className="bg-amber-100/80 border-2 border-amber-300 rounded-3xl p-4 mb-5 flex items-center justify-between text-xs font-bold text-amber-900 shadow-sm">
               <div className="flex items-center gap-2">
                 <span className="text-xl">🔒</span>
-                <span>目前為**唯讀觀看模式**。請點擊右上方登入 Google 帳號鎖定身份後，方可新增採購、登記晚餐或進行消帳！</span>
+                <span>目前為**唯讀觀看模式**。請點擊右上方登入身份後，方可新增採購、登記晚餐或進行消帳！</span>
               </div>
               <button
                 onClick={() => setShowLoginModal(true)}
@@ -772,7 +763,7 @@
                           <span>{currentUser} (自動鎖定)</span>
                         </>
                       ) : (
-                        <span className="text-slate-400">🔒 請先登入 Google 帳號</span>
+                        <span className="text-slate-400">🔒 請先登入身份</span>
                       )}
                     </div>
                   </div>
@@ -1063,63 +1054,76 @@
             </div>
           )}
 
-          {/* Modal: Google 登入 */}
-          {showLoginModal && (
-            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                    <i className="fa-brands fa-google text-red-500"></i>
-                    Google 帳號身份驗證
-                  </h3>
-                  <button onClick={() => setShowLoginModal(false)} className="text-slate-400 hover:text-slate-600">
-                    <i className="fa-solid fa-xmark text-lg"></i>
-                  </button>
-                </div>
+          {/* Modal: 身份登入 */}
+          {showLoginModal && (() => {
+            const target = roommates.find(r => r.id === bindTarget);
+            const isFirstTimeSetup = target && !target.pin;
 
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">請選擇你是哪位室友：</label>
-                    <div className="grid grid-cols-3 gap-2">
-                      {roommates.map(r => (
-                        <button
-                          key={r.id}
-                          type="button"
-                          onClick={() => setBindTarget(r.id)}
-                          className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
-                            bindTarget === r.id
-                              ? 'bg-rose-50 border-rose-500 text-rose-700'
-                              : 'bg-slate-50 border-slate-200 text-slate-600'
-                          }`}
-                        >
-                          <span className="text-lg">{r.emoji}</span>
-                          <span>{r.name}</span>
-                        </button>
-                      ))}
+            return (
+              <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                      <i className="fa-solid fa-key text-rose-500"></i>
+                      室友身份登入
+                    </h3>
+                    <button onClick={() => { setShowLoginModal(false); setPinInput(''); }} className="text-slate-400 hover:text-slate-600">
+                      <i className="fa-solid fa-xmark text-lg"></i>
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 mb-1">請選擇你是哪位室友：</label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {roommates.map(r => (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => { setBindTarget(r.id); setPinInput(''); }}
+                            className={`p-2 rounded-2xl text-xs font-bold border-2 transition flex flex-col items-center gap-1 ${
+                              bindTarget === r.id
+                                ? 'bg-rose-50 border-rose-500 text-rose-700'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                            }`}
+                          >
+                            <span className="text-lg">{r.emoji}</span>
+                            <span>{r.name}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
-                  <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">Google 電子郵件 (Email)：</label>
-                    <input
-                      type="email"
-                      placeholder="your-name@gmail.com"
-                      value={loginEmailInput}
-                      onChange={(e) => setLoginEmailInput(e.target.value)}
-                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm focus:outline-none focus:border-rose-400"
-                    />
-                  </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-600 mb-1">
+                        {isFirstTimeSetup ? '首次登入，請設定你的 PIN 碼 (4-6 位數字)：' : '請輸入你的 PIN 碼：'}
+                      </label>
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        maxLength="6"
+                        placeholder={isFirstTimeSetup ? '設定新 PIN 碼' : '輸入 PIN 碼'}
+                        value={pinInput}
+                        onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handlePinLogin(); }}
+                        className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm tracking-widest focus:outline-none focus:border-rose-400"
+                      />
+                      {isFirstTimeSetup && (
+                        <p className="text-[10px] text-amber-600 mt-1">⚠️ 這組 PIN 碼之後每次登入都要用，請記住！</p>
+                      )}
+                    </div>
 
-                  <button
-                    onClick={() => handleLoginAndBind(loginEmailInput, bindTarget)}
-                    className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
-                  >
-                    驗證並綁定登入
-                  </button>
+                    <button
+                      onClick={handlePinLogin}
+                      className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
+                    >
+                      {isFirstTimeSetup ? '設定並登入' : '登入'}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Modal: 數據備份 */}
           {showBackupModal && (
