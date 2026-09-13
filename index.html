@@ -68,25 +68,42 @@
       { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', pin: null }
     ];
 
-    function getPast13Weeks(baseDate = new Date()) {
+    const LEDGER_START_DATE = new Date(2026, 8, 7); // 帳本從這週開始記錄 (2026-09-07)
+    const MAX_WEEKS_HISTORY = 13; // 最多保留約 3 個月的週紀錄
+
+    function getRecentWeeks(baseDate = new Date()) {
       const weeks = [];
       const now = new Date(baseDate);
       const day = now.getDay();
       const diffToMonday = (day === 0 ? -6 : 1) - day;
       const currentMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + diffToMonday);
 
-      for (let i = 0; i < 13; i++) {
+      for (let i = 0; i < MAX_WEEKS_HISTORY; i++) {
         const mon = new Date(currentMonday.getFullYear(), currentMonday.getMonth(), currentMonday.getDate() - (i * 7));
+        if (mon < LEDGER_START_DATE) break;
+
         const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
 
         const formatDateDisplay = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
         const key = formatLocalDate(mon);
-        const label = i === 0 
+        const label = i === 0
           ? `本週 (${formatDateDisplay(mon)} - ${formatDateDisplay(sun)})`
           : `${i} 週前 (${formatDateDisplay(mon)} - ${formatDateDisplay(sun)})`;
 
         weeks.push({ key, label, startDate: mon, endDate: sun });
       }
+
+      if (weeks.length === 0) {
+        const sun = new Date(currentMonday.getFullYear(), currentMonday.getMonth(), currentMonday.getDate() + 6);
+        const formatDateDisplay = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
+        weeks.push({
+          key: formatLocalDate(currentMonday),
+          label: `本週 (${formatDateDisplay(currentMonday)} - ${formatDateDisplay(sun)})`,
+          startDate: currentMonday,
+          endDate: sun
+        });
+      }
+
       return weeks;
     }
 
@@ -95,7 +112,7 @@
       const [syncStatus, setSyncStatus] = useState('syncing'); // 'online' | 'syncing' | 'error'
       const [lastSyncTime, setLastSyncTime] = useState(null);
 
-      const weeksList = useMemo(() => getPast13Weeks(currentNowDate), [currentNowDate]);
+      const weeksList = useMemo(() => getRecentWeeks(currentNowDate), [currentNowDate]);
       const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
       const [activeTab, setActiveTab] = useState('expenses');
       
