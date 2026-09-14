@@ -171,6 +171,14 @@
     ];
     const MANUAL_BILL_TYPES = BILL_TYPES.filter(t => t.id !== 'rent');
 
+    // 固定由誰先付：房租固定 Kingsley，電/水/Council Tax 固定 Janice；「其他帳單」沒有固定人選，由登記人自己先付
+    const FIXED_BILL_PAYERS = {
+      rent: 'Kingsley',
+      electricity: 'Janice',
+      water: 'Janice',
+      council_tax: 'Janice'
+    };
+
     function getRecentMonths(baseDate = new Date()) {
       const months = [];
       const now = new Date(baseDate);
@@ -660,7 +668,7 @@
           type: 'rent',
           title: '每月房租',
           amount: parseFloat((RENT_PER_PERSON * splitIds.length).toFixed(2)),
-          payer: currentUser,
+          payer: FIXED_BILL_PAYERS.rent,
           month: currentMonthObj.key,
           splitWith: splitIds,
           registeredBy: currentUser,
@@ -692,7 +700,7 @@
           type: billType,
           title: typeObj.name,
           amount: parseFloat(billAmount),
-          payer: currentUser,
+          payer: FIXED_BILL_PAYERS[billType] || currentUser,
           month: currentMonthObj.key,
           splitWith: billSplit,
           registeredBy: currentUser,
@@ -1447,8 +1455,8 @@
                   <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
                     <div className="text-xs text-slate-500">
                       每人固定 <strong className="text-slate-700">£{RENT_PER_PERSON.toFixed(2)}</strong>，
-                      由登入的人先付總額 £{(RENT_PER_PERSON * roommates.length).toFixed(2)}，
-                      其他室友再均分轉帳給他/她。
+                      固定由 <strong className="text-slate-700">{getRoommateObj(FIXED_BILL_PAYERS.rent).emoji} {FIXED_BILL_PAYERS.rent}</strong> 先付總額 £{(RENT_PER_PERSON * roommates.length).toFixed(2)}，
+                      其他室友再均分轉帳給他。
                     </div>
                     <button
                       onClick={handleAddRent}
@@ -1508,9 +1516,16 @@
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-600 mb-1">先付人 (Payer - 鎖定本人)</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">
+                      先付人 {FIXED_BILL_PAYERS[billType] ? '(固定)' : '(Payer - 鎖定本人)'}
+                    </label>
                     <div className="bg-slate-100 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-xs font-bold text-slate-700 flex items-center gap-2">
-                      {currentUser ? (
+                      {FIXED_BILL_PAYERS[billType] ? (
+                        <>
+                          <span>{getRoommateObj(FIXED_BILL_PAYERS[billType]).emoji}</span>
+                          <span>{FIXED_BILL_PAYERS[billType]} (固定先付)</span>
+                        </>
+                      ) : currentUser ? (
                         <>
                           <span>{currentRmUserObj.emoji}</span>
                           <span>{currentUser} (自動鎖定)</span>
