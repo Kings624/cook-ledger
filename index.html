@@ -232,6 +232,9 @@
       const [unsettledItems, setUnsettledItems] = useState([]);
       const unsettledCheckedForRef = React.useRef(null);
 
+      const [showRentReminderModal, setShowRentReminderModal] = useState(false);
+      const rentReminderShownForRef = React.useRef(null);
+
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [currentUser, setCurrentUser] = useState(null);
 
@@ -641,6 +644,13 @@
         setBillSplit(roommates.map(r => r.id));
       }, [roommates]);
 
+      // 登入的人若不是該帳單類型的固定登記人，自動切換到「其他帳單」
+      useEffect(() => {
+        if (currentUser && FIXED_BILL_PAYERS[billType] && FIXED_BILL_PAYERS[billType] !== currentUser) {
+          setBillType('other');
+        }
+      }, [currentUser]);
+
       const currentMonthObj = useMemo(() => {
         return monthsList.find(m => m.key === selectedMonthKey) || monthsList[0];
       }, [selectedMonthKey, monthsList]);
@@ -658,6 +668,10 @@
       const handleAddRent = () => {
         if (!currentUser) {
           alert('🔒 請先登入身份！');
+          return;
+        }
+        if (currentUser !== FIXED_BILL_PAYERS.rent) {
+          alert(`🔒 權限限制：房租只有 ${FIXED_BILL_PAYERS.rent} 可以登記！`);
           return;
         }
         if (hasRentThisMonth) return;
@@ -686,6 +700,12 @@
 
         if (!currentUser) {
           alert('🔒 權限限制：請先登入身份！');
+          return;
+        }
+
+        if (FIXED_BILL_PAYERS[billType] && currentUser !== FIXED_BILL_PAYERS[billType]) {
+          const typeName = (BILL_TYPES.find(t => t.id === billType) || {}).name || '此帳單';
+          alert(`🔒 權限限制：${typeName} 只有 ${FIXED_BILL_PAYERS[billType]} 可以登記！`);
           return;
         }
 
@@ -792,10 +812,14 @@
           const weekSettles = settlements[week.key] || {};
 
           transfers.forEach(tr => {
-            if (tr.from !== currentUser && tr.to !== currentUser) return;
             const status = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
             if (status.payerPaid && status.receiverConfirmed) return;
-            items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status });
+            // 先提示付款人付款；付款人標記已付款後，才提示收款人確認消帳
+            if (tr.from === currentUser && !status.payerPaid) {
+              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status, role: 'payer' });
+            } else if (tr.to === currentUser && status.payerPaid && !status.receiverConfirmed) {
+              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status, role: 'receiver' });
+            }
           });
         });
 
@@ -807,16 +831,33 @@
           const monthSettles = billSettlements[month.key] || {};
 
           transfers.forEach(tr => {
-            if (tr.from !== currentUser && tr.to !== currentUser) return;
             const status = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
             if (status.payerPaid && status.receiverConfirmed) return;
-            items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status });
+            if (tr.from === currentUser && !status.payerPaid) {
+              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status, role: 'payer' });
+            } else if (tr.to === currentUser && status.payerPaid && !status.receiverConfirmed) {
+              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status, role: 'receiver' });
+            }
           });
         });
 
         if (items.length > 0) {
           setUnsettledItems(items);
           setShowUnsettledModal(true);
+          return;
+        }
+
+        // 沒有待處理的消帳項目時，檢查是否需要提醒本月房租 (每月 1 號)
+        const today = new Date();
+        if (today.getDate() === 1) {
+          const thisMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+          if (rentReminderShownForRef.current !== `${currentUser}_${thisMonthKey}`) {
+            rentReminderShownForRef.current = `${currentUser}_${thisMonthKey}`;
+            const rentAlreadyAdded = bills.some(b => b.type === 'rent' && b.month === thisMonthKey);
+            if (!rentAlreadyAdded) {
+              setShowRentReminderModal(true);
+            }
+          }
         }
       }, [currentUser, syncStatus, expenses, settlements, bills, billSettlements, roommates, weeksList, monthsList]);
 
@@ -1460,10 +1501,11 @@
                     </div>
                     <button
                       onClick={handleAddRent}
-                      disabled={!currentUser}
+                      disabled={!currentUser || currentUser !== FIXED_BILL_PAYERS.rent}
+                      title={currentUser && currentUser !== FIXED_BILL_PAYERS.rent ? `僅 ${FIXED_BILL_PAYERS.rent} 可登記` : ''}
                       className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold px-4 py-2 rounded-2xl shadow-md transition text-xs shrink-0 disabled:bg-slate-300 disabled:cursor-not-allowed"
                     >
-                      {currentUser ? '＋ 新增本月房租' : '🔒 需登入'}
+                      {!currentUser ? '🔒 需登入' : currentUser !== FIXED_BILL_PAYERS.rent ? `🔒 僅 ${FIXED_BILL_PAYERS.rent} 可登記` : '＋ 新增本月房租'}
                     </button>
                   </div>
                 )}
@@ -1471,30 +1513,36 @@
 
               {/* 新增電費/水費/Council Tax/其他帳單 */}
               <form onSubmit={handleAddBill} className={`bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100 ${!currentUser ? 'opacity-60' : ''}`}>
-                <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
+                <h2 className="text-base font-bold text-slate-800 mb-1 flex items-center gap-2">
                   <span className="text-xl">🧾</span>
                   新增帳單 (電費 / 水費 / Council Tax) {!currentUser && <span className="text-xs text-rose-500 font-bold">(🔒 需登入)</span>}
                 </h2>
+                <p className="text-xs text-slate-400 mb-3">🔒 電費 / 水費 / Council Tax 只有 {FIXED_BILL_PAYERS.electricity} 可以登記，其他室友只負責分攤與確認消帳。</p>
 
                 <div className="mb-4">
                   <label className="block text-xs font-bold text-slate-600 mb-2">帳單類型：</label>
                   <div className="flex flex-wrap gap-2">
                     {MANUAL_BILL_TYPES.map(t => {
                       const isSelected = billType === t.id;
+                      const isLocked = FIXED_BILL_PAYERS[t.id] && currentUser !== FIXED_BILL_PAYERS[t.id];
                       return (
                         <button
                           type="button"
                           key={t.id}
-                          disabled={!currentUser}
+                          disabled={!currentUser || isLocked}
+                          title={isLocked ? `僅 ${FIXED_BILL_PAYERS[t.id]} 可登記` : ''}
                           onClick={() => setBillType(t.id)}
                           className={`px-3 py-1.5 rounded-2xl text-xs font-bold border-2 transition flex items-center gap-1.5 ${
                             isSelected
                               ? `${t.color} ring-2 ring-rose-300 scale-105 shadow-sm`
-                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                              : isLocked
+                                ? 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'
+                                : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
                           }`}
                         >
                           <span>{t.emoji}</span>
                           <span>{t.name}</span>
+                          {isLocked && <i className="fa-solid fa-lock text-[9px]"></i>}
                         </button>
                       );
                     })}
@@ -1975,6 +2023,53 @@
                 >
                   知道了，稍後處理
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 每月 1 號房租提醒 */}
+          {showRentReminderModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-indigo-200 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <span className="text-xl">📅</span>
+                    今天是 1 號，房租提醒
+                  </h3>
+                  <button onClick={() => setShowRentReminderModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                {currentUser === FIXED_BILL_PAYERS.rent ? (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-600">
+                      別忘了先墊付本月房租，並在「每月帳單」登記，每人分攤 £{RENT_PER_PERSON.toFixed(2)}。
+                    </p>
+                    <button
+                      onClick={() => {
+                        setSelectedMonthKey(monthsList[0].key);
+                        setActiveTab('bills');
+                        setShowRentReminderModal(false);
+                      }}
+                      className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2.5 rounded-2xl shadow-md transition text-xs"
+                    >
+                      前往登記房租
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-600">
+                      本月房租由 {getRoommateObj(FIXED_BILL_PAYERS.rent).emoji} {FIXED_BILL_PAYERS.rent} 先付，登記後你會在「每月帳單」看到需要分攤 £{RENT_PER_PERSON.toFixed(2)}。
+                    </p>
+                    <button
+                      onClick={() => setShowRentReminderModal(false)}
+                      className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-2.5 rounded-2xl transition text-xs"
+                    >
+                      知道了
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           )}
