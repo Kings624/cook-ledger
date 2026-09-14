@@ -52,6 +52,11 @@
       { id: 'staple', name: '麵包主食', emoji: '🍞', color: 'bg-amber-100 text-amber-800 border-amber-300' },
       { id: 'drink', name: '飲料零食', emoji: '🧃', color: 'bg-purple-100 text-purple-800 border-purple-300' },
       { id: 'pantry', name: '日用調味', emoji: '🧴', color: 'bg-sky-100 text-sky-800 border-sky-300' },
+      { id: 'household', name: '家居清潔', emoji: '🧽', color: 'bg-cyan-100 text-cyan-800 border-cyan-300' },
+      { id: 'personal', name: '個人護理', emoji: '🧼', color: 'bg-pink-100 text-pink-800 border-pink-300' },
+      { id: 'kitchen', name: '廚房用品', emoji: '🍳', color: 'bg-teal-100 text-teal-800 border-teal-300' },
+      { id: 'medicine', name: '醫藥保健', emoji: '💊', color: 'bg-lime-100 text-lime-800 border-lime-300' },
+      { id: 'takeaway', name: '外食外賣', emoji: '🍱', color: 'bg-orange-100 text-orange-800 border-orange-300' },
       { id: 'other', name: '其他採購', emoji: '🛍️', color: 'bg-slate-100 text-slate-800 border-slate-300' }
     ];
 
@@ -107,6 +112,95 @@
       return weeks;
     }
 
+    // 通用「誰付了多少、應付多少、互相要轉多少錢」計算 (週採購 / 月帳單共用)
+    function calculateTransfers(items, roommates) {
+      const paidMap = {};
+      const oweMap = {};
+      roommates.forEach(r => { paidMap[r.id] = 0; oweMap[r.id] = 0; });
+
+      items.forEach(item => {
+        paidMap[item.payer] = (paidMap[item.payer] || 0) + item.amount;
+        const share = item.amount / item.splitWith.length;
+        item.splitWith.forEach(person => {
+          oweMap[person] = (oweMap[person] || 0) + share;
+        });
+      });
+
+      const netMap = {};
+      roommates.forEach(r => { netMap[r.id] = (paidMap[r.id] || 0) - (oweMap[r.id] || 0); });
+
+      const creditors = [];
+      const debtors = [];
+
+      Object.keys(netMap).forEach(person => {
+        const val = Math.round(netMap[person] * 100) / 100;
+        if (val > 0.01) creditors.push({ person, amount: val });
+        else if (val < -0.01) debtors.push({ person, amount: -val });
+      });
+
+      const transfers = [];
+      let i = 0, j = 0;
+      while (i < debtors.length && j < creditors.length) {
+        const pay = Math.min(debtors[i].amount, creditors[j].amount);
+        if (pay > 0.009) {
+          transfers.push({
+            id: `tr_${debtors[i].person}_${creditors[j].person}_${pay.toFixed(2)}`,
+            from: debtors[i].person,
+            to: creditors[j].person,
+            amount: parseFloat(pay.toFixed(2))
+          });
+        }
+        debtors[i].amount -= pay;
+        creditors[j].amount -= pay;
+        if (debtors[i].amount < 0.01) i++;
+        if (creditors[j].amount < 0.01) j++;
+      }
+
+      return { paidMap, oweMap, netMap, transfers };
+    }
+
+    const MAX_MONTHS_HISTORY = 12; // 最多保留 12 個月的帳單紀錄
+    const RENT_PER_PERSON = 983.33;
+
+    const BILL_TYPES = [
+      { id: 'rent', name: '房租', emoji: '🏠', color: 'bg-indigo-100 text-indigo-800 border-indigo-300' },
+      { id: 'electricity', name: '電費', emoji: '⚡', color: 'bg-amber-100 text-amber-800 border-amber-300' },
+      { id: 'water', name: '水費', emoji: '💧', color: 'bg-sky-100 text-sky-800 border-sky-300' },
+      { id: 'council_tax', name: 'Council Tax', emoji: '🏛️', color: 'bg-rose-100 text-rose-800 border-rose-300' },
+      { id: 'other', name: '其他帳單', emoji: '🧾', color: 'bg-slate-100 text-slate-800 border-slate-300' }
+    ];
+    const MANUAL_BILL_TYPES = BILL_TYPES.filter(t => t.id !== 'rent');
+
+    function getRecentMonths(baseDate = new Date()) {
+      const months = [];
+      const now = new Date(baseDate);
+      const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const ledgerStartMonth = new Date(LEDGER_START_DATE.getFullYear(), LEDGER_START_DATE.getMonth(), 1);
+
+      for (let i = 0; i < MAX_MONTHS_HISTORY; i++) {
+        const m = new Date(currentMonthStart.getFullYear(), currentMonthStart.getMonth() - i, 1);
+        if (m < ledgerStartMonth) break;
+
+        const key = `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, '0')}`;
+        const label = i === 0
+          ? `本月 (${m.getFullYear()}/${m.getMonth() + 1})`
+          : `${m.getFullYear()}/${m.getMonth() + 1}`;
+
+        months.push({ key, label, year: m.getFullYear(), month: m.getMonth() });
+      }
+
+      if (months.length === 0) {
+        months.push({
+          key: `${currentMonthStart.getFullYear()}-${String(currentMonthStart.getMonth() + 1).padStart(2, '0')}`,
+          label: `本月 (${currentMonthStart.getFullYear()}/${currentMonthStart.getMonth() + 1})`,
+          year: currentMonthStart.getFullYear(),
+          month: currentMonthStart.getMonth()
+        });
+      }
+
+      return months;
+    }
+
     function App() {
       const [currentNowDate] = useState(new Date());
       const [syncStatus, setSyncStatus] = useState('syncing'); // 'online' | 'syncing' | 'error'
@@ -114,8 +208,22 @@
 
       const weeksList = useMemo(() => getRecentWeeks(currentNowDate), [currentNowDate]);
       const [selectedWeekKey, setSelectedWeekKey] = useState(weeksList[0].key);
+
+      const monthsList = useMemo(() => getRecentMonths(currentNowDate), [currentNowDate]);
+      const [selectedMonthKey, setSelectedMonthKey] = useState(monthsList[0].key);
+
       const [activeTab, setActiveTab] = useState('expenses');
-      
+
+      const [bills, setBills] = useState([]);
+      const [billSettlements, setBillSettlements] = useState({});
+      const [billType, setBillType] = useState('electricity');
+      const [billAmount, setBillAmount] = useState('');
+      const [billSplit, setBillSplit] = useState(['Janice', 'Carrie', 'Kingsley']);
+
+      const [showUnsettledModal, setShowUnsettledModal] = useState(false);
+      const [unsettledItems, setUnsettledItems] = useState([]);
+      const unsettledCheckedForRef = React.useRef(null);
+
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [currentUser, setCurrentUser] = useState(null);
 
@@ -144,6 +252,8 @@
         if (data.dinnerAbsent) setDinnerAbsent(data.dinnerAbsent);
         if (data.settlements) setSettlements(data.settlements);
         if (data.roommates) setRoommates(data.roommates);
+        if (data.bills) setBills(data.bills);
+        if (data.billSettlements) setBillSettlements(data.billSettlements);
         setLastSyncTime(new Date().toLocaleTimeString());
         localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(data));
       };
@@ -178,7 +288,7 @@
               setSyncStatus('online');
             } else if (error && error.code === 'PGRST116') {
               // 代表該 row 尚未建立，建立預設 row
-              const initPayload = { expenses: [], dinnerAbsent: {}, settlements: {}, roommates: INITIAL_ROOMMATES };
+              const initPayload = { expenses: [], dinnerAbsent: {}, settlements: {}, roommates: INITIAL_ROOMMATES, bills: [], billSettlements: {} };
               await supabase.from('cook_ledger').insert([{ id: DB_ROW_ID, data: initPayload }]);
               setSyncStatus('online');
             }
@@ -214,12 +324,14 @@
       }, []);
 
       // 推送寫入 Supabase
-      const saveData = async (newExp, newDin, newSet, newRm) => {
+      const saveData = async (newExp, newDin, newSet, newRm, newBills, newBillSet) => {
         const payload = {
           expenses: newExp !== undefined ? newExp : expenses,
           dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
           settlements: newSet !== undefined ? newSet : settlements,
-          roommates: newRm !== undefined ? newRm : roommates
+          roommates: newRm !== undefined ? newRm : roommates,
+          bills: newBills !== undefined ? newBills : bills,
+          billSettlements: newBillSet !== undefined ? newBillSet : billSettlements
         };
 
         localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
@@ -258,6 +370,12 @@
             return;
           }
         } else {
+          const duplicate = roommates.find(r => r.id !== target.id && r.pin === pinInput);
+          if (duplicate) {
+            alert(`⚠️ 這組 PIN 碼已經被 ${duplicate.name} 使用，請換一組不同的 PIN 碼！`);
+            return;
+          }
+
           const updatedRoommates = roommates.map(r =>
             r.id === target.id ? { ...r, pin: pinInput } : r
           );
@@ -299,6 +417,12 @@
           return;
         }
 
+        const duplicate = roommates.find(r => r.id !== me.id && r.pin === newPinInput);
+        if (duplicate) {
+          alert(`⚠️ 這組 PIN 碼已經被 ${duplicate.name} 使用，請換一組不同的 PIN 碼！`);
+          return;
+        }
+
         const updatedRoommates = roommates.map(r => r.id === me.id ? { ...r, pin: newPinInput } : r);
         setRoommates(updatedRoommates);
         saveData(undefined, undefined, undefined, updatedRoommates);
@@ -313,10 +437,11 @@
       const handleLogout = () => {
         setCurrentUser(null);
         localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+        unsettledCheckedForRef.current = null;
       };
 
       const handleExportBackup = () => {
-        const payload = { expenses, dinnerAbsent, settlements, roommates };
+        const payload = { expenses, dinnerAbsent, settlements, roommates, bills, billSettlements };
         const jsonStr = JSON.stringify(payload, null, 2);
         navigator.clipboard.writeText(jsonStr);
         alert('📋 數據已成功複製到剪貼簿！');
@@ -330,8 +455,10 @@
           if (parsed.dinnerAbsent) setDinnerAbsent(parsed.dinnerAbsent);
           if (parsed.settlements) setSettlements(parsed.settlements);
           if (parsed.roommates) setRoommates(parsed.roommates);
+          if (parsed.bills) setBills(parsed.bills);
+          if (parsed.billSettlements) setBillSettlements(parsed.billSettlements);
 
-          saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates);
+          saveData(parsed.expenses, parsed.dinnerAbsent, parsed.settlements, parsed.roommates, parsed.bills, parsed.billSettlements);
           setShowBackupModal(false);
           setBackupJsonInput('');
           alert('✅ 數據已成功匯入並同步至 Supabase 雲端！');
@@ -464,52 +591,8 @@
       }, [expenses, currentWeekObj]);
 
       const weeklyCalculation = useMemo(() => {
-        const paidMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
-        const oweMap = { Janice: 0, Carrie: 0, Kingsley: 0 };
-
-        currentWeekExpenses.forEach(exp => {
-          paidMap[exp.payer] = (paidMap[exp.payer] || 0) + exp.amount;
-          const share = exp.amount / exp.splitWith.length;
-          exp.splitWith.forEach(person => {
-            oweMap[person] = (oweMap[person] || 0) + share;
-          });
-        });
-
-        const netMap = {
-          Janice: (paidMap.Janice || 0) - (oweMap.Janice || 0),
-          Carrie: (paidMap.Carrie || 0) - (oweMap.Carrie || 0),
-          Kingsley: (paidMap.Kingsley || 0) - (oweMap.Kingsley || 0)
-        };
-
-        const creditors = [];
-        const debtors = [];
-
-        Object.keys(netMap).forEach(person => {
-          const val = Math.round(netMap[person] * 100) / 100;
-          if (val > 0.01) creditors.push({ person, amount: val });
-          else if (val < -0.01) debtors.push({ person, amount: -val });
-        });
-
-        const transfers = [];
-        let i = 0, j = 0;
-        while (i < debtors.length && j < creditors.length) {
-          const pay = Math.min(debtors[i].amount, creditors[j].amount);
-          if (pay > 0.009) {
-            transfers.push({
-              id: `tr_${debtors[i].person}_${creditors[j].person}_${pay.toFixed(2)}`,
-              from: debtors[i].person,
-              to: creditors[j].person,
-              amount: parseFloat(pay.toFixed(2))
-            });
-          }
-          debtors[i].amount -= pay;
-          creditors[j].amount -= pay;
-          if (debtors[i].amount < 0.01) i++;
-          if (creditors[j].amount < 0.01) j++;
-        }
-
-        return { paidMap, oweMap, netMap, transfers };
-      }, [currentWeekExpenses]);
+        return calculateTransfers(currentWeekExpenses, roommates);
+      }, [currentWeekExpenses, roommates]);
 
       const handleTogglePaymentStatus = (tr, actionType) => {
         if (!currentUser) {
@@ -544,8 +627,194 @@
         saveData(undefined, undefined, updatedSettlements, undefined);
       };
 
+      // ===== 每月帳單 (房租 / 電費 / 水費 / Council Tax) =====
+
+      useEffect(() => {
+        setBillSplit(roommates.map(r => r.id));
+      }, [roommates]);
+
+      const currentMonthObj = useMemo(() => {
+        return monthsList.find(m => m.key === selectedMonthKey) || monthsList[0];
+      }, [selectedMonthKey, monthsList]);
+
+      const currentMonthBills = useMemo(() => {
+        return bills.filter(b => b.month === currentMonthObj.key);
+      }, [bills, currentMonthObj]);
+
+      const monthlyCalculation = useMemo(() => {
+        return calculateTransfers(currentMonthBills, roommates);
+      }, [currentMonthBills, roommates]);
+
+      const hasRentThisMonth = currentMonthBills.some(b => b.type === 'rent');
+
+      const handleAddRent = () => {
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          return;
+        }
+        if (hasRentThisMonth) return;
+
+        const splitIds = roommates.map(r => r.id);
+        const newEntry = {
+          id: 'bill_' + Date.now(),
+          type: 'rent',
+          title: '每月房租',
+          amount: parseFloat((RENT_PER_PERSON * splitIds.length).toFixed(2)),
+          payer: currentUser,
+          month: currentMonthObj.key,
+          splitWith: splitIds,
+          registeredBy: currentUser,
+          createdAt: new Date().toISOString()
+        };
+
+        const updated = [newEntry, ...bills];
+        setBills(updated);
+        saveData(undefined, undefined, undefined, undefined, updated);
+        alert(`✨ 已新增本月房租！每人 £${RENT_PER_PERSON.toFixed(2)}`);
+      };
+
+      const handleAddBill = (e) => {
+        e.preventDefault();
+
+        if (!currentUser) {
+          alert('🔒 權限限制：請先登入身份！');
+          return;
+        }
+
+        if (!billAmount || parseFloat(billAmount) <= 0 || billSplit.length === 0) {
+          alert('請填寫金額，並選擇至少一位分攤成員！');
+          return;
+        }
+
+        const typeObj = BILL_TYPES.find(t => t.id === billType) || BILL_TYPES[BILL_TYPES.length - 1];
+        const newEntry = {
+          id: 'bill_' + Date.now(),
+          type: billType,
+          title: typeObj.name,
+          amount: parseFloat(billAmount),
+          payer: currentUser,
+          month: currentMonthObj.key,
+          splitWith: billSplit,
+          registeredBy: currentUser,
+          createdAt: new Date().toISOString()
+        };
+
+        const updated = [newEntry, ...bills];
+        setBills(updated);
+        saveData(undefined, undefined, undefined, undefined, updated);
+
+        setBillAmount('');
+        alert('✨ 成功加入帳單！');
+      };
+
+      const handleDeleteBill = (bill) => {
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          return;
+        }
+
+        if (bill.registeredBy !== currentUser) {
+          alert(`🔒 權限限制：此筆帳單是由 ${bill.registeredBy} 登記的，只有登記本人才可以刪除喔！`);
+          return;
+        }
+
+        if (confirm(`確定要刪除「${bill.title}」這筆紀錄嗎？`)) {
+          const updated = bills.filter(b => b.id !== bill.id);
+          setBills(updated);
+          saveData(undefined, undefined, undefined, undefined, updated);
+        }
+      };
+
+      const handleToggleBillPaymentStatus = (tr, actionType) => {
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          return;
+        }
+
+        if (actionType === 'payer_pay' && currentUser !== tr.from) {
+          alert(`🔒 權限限制：付款方為 ${tr.from}，只能由 ${tr.from} 本人點擊！`);
+          return;
+        }
+
+        if (actionType === 'receiver_confirm' && currentUser !== tr.to) {
+          alert(`🔒 權限限制：收款方為 ${tr.to}，只能由 ${tr.to} 本人點擊！`);
+          return;
+        }
+
+        const monthSettles = billSettlements[currentMonthObj.key] || {};
+        const currentStatus = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+
+        let updatedStatus = { ...currentStatus };
+        if (actionType === 'payer_pay') {
+          updatedStatus.payerPaid = !updatedStatus.payerPaid;
+        } else if (actionType === 'receiver_confirm') {
+          updatedStatus.receiverConfirmed = !updatedStatus.receiverConfirmed;
+        }
+
+        const updatedMonthSettles = { ...monthSettles, [tr.id]: updatedStatus };
+        const updatedBillSettlements = { ...billSettlements, [currentMonthObj.key]: updatedMonthSettles };
+
+        setBillSettlements(updatedBillSettlements);
+        saveData(undefined, undefined, undefined, undefined, undefined, updatedBillSettlements);
+      };
+
+      // ===== 登入時檢查是否有未結算款項 =====
+
+      useEffect(() => {
+        if (!currentUser || syncStatus !== 'online') return;
+        if (unsettledCheckedForRef.current === currentUser) return;
+        unsettledCheckedForRef.current = currentUser;
+
+        const items = [];
+
+        weeksList.forEach(week => {
+          const start = new Date(week.startDate);
+          start.setHours(0, 0, 0, 0);
+          const end = new Date(week.endDate);
+          end.setHours(23, 59, 59, 999);
+
+          const weekExpenses = expenses.filter(exp => {
+            const parts = exp.date.split('-');
+            const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+            return d >= start && d <= end;
+          });
+          if (weekExpenses.length === 0) return;
+
+          const { transfers } = calculateTransfers(weekExpenses, roommates);
+          const weekSettles = settlements[week.key] || {};
+
+          transfers.forEach(tr => {
+            if (tr.from !== currentUser && tr.to !== currentUser) return;
+            const status = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+            if (status.payerPaid && status.receiverConfirmed) return;
+            items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status });
+          });
+        });
+
+        monthsList.forEach(month => {
+          const monthBills = bills.filter(b => b.month === month.key);
+          if (monthBills.length === 0) return;
+
+          const { transfers } = calculateTransfers(monthBills, roommates);
+          const monthSettles = billSettlements[month.key] || {};
+
+          transfers.forEach(tr => {
+            if (tr.from !== currentUser && tr.to !== currentUser) return;
+            const status = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+            if (status.payerPaid && status.receiverConfirmed) return;
+            items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status });
+          });
+        });
+
+        if (items.length > 0) {
+          setUnsettledItems(items);
+          setShowUnsettledModal(true);
+        }
+      }, [currentUser, syncStatus, expenses, settlements, bills, billSettlements, roommates, weeksList, monthsList]);
+
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
       const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
+      const getBillTypeObj = (typeId) => BILL_TYPES.find(t => t.id === typeId) || BILL_TYPES[BILL_TYPES.length - 1];
 
       const currentRmUserObj = currentUser ? getRoommateObj(currentUser) : null;
 
@@ -697,27 +966,48 @@
           </div>
 
           {/* 週選擇導覽 */}
-          <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <i className="fa-solid fa-calendar-heart text-rose-500 text-lg"></i>
-              <span className="font-bold text-slate-700 text-sm">採購與結算週期：</span>
+          {activeTab !== 'bills' && (
+            <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <i className="fa-solid fa-calendar-heart text-rose-500 text-lg"></i>
+                <span className="font-bold text-slate-700 text-sm">採購與結算週期：</span>
+              </div>
+              <select
+                value={selectedWeekKey}
+                onChange={(e) => setSelectedWeekKey(e.target.value)}
+                className="bg-rose-50/50 border-2 border-rose-200 rounded-2xl px-4 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-400"
+              >
+                {weeksList.map(w => (
+                  <option key={w.key} value={w.key}>{w.label}</option>
+                ))}
+              </select>
             </div>
-            <select
-              value={selectedWeekKey}
-              onChange={(e) => setSelectedWeekKey(e.target.value)}
-              className="bg-rose-50/50 border-2 border-rose-200 rounded-2xl px-4 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-400"
-            >
-              {weeksList.map(w => (
-                <option key={w.key} value={w.key}>{w.label}</option>
-              ))}
-            </select>
-          </div>
+          )}
+
+          {/* 月份選擇導覽 (帳單專用) */}
+          {activeTab === 'bills' && (
+            <div className="bg-white rounded-3xl p-4 shadow-sm mb-5 border-2 border-rose-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <i className="fa-solid fa-calendar-days text-rose-500 text-lg"></i>
+                <span className="font-bold text-slate-700 text-sm">帳單月份：</span>
+              </div>
+              <select
+                value={selectedMonthKey}
+                onChange={(e) => setSelectedMonthKey(e.target.value)}
+                className="bg-rose-50/50 border-2 border-rose-200 rounded-2xl px-4 py-2 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-rose-400"
+              >
+                {monthsList.map(m => (
+                  <option key={m.key} value={m.key}>{m.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* TAB 頁籤 */}
-          <div className="flex bg-rose-100/60 p-1.5 rounded-3xl mb-5 text-sm font-bold">
+          <div className="flex flex-wrap bg-rose-100/60 p-1.5 rounded-3xl mb-5 text-xs sm:text-sm font-bold gap-1">
             <button
               onClick={() => setActiveTab('expenses')}
-              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+              className={`flex-1 min-w-[45%] sm:min-w-0 py-2.5 rounded-2xl transition flex items-center justify-center gap-1.5 ${
                 activeTab === 'expenses' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
@@ -726,7 +1016,7 @@
             </button>
             <button
               onClick={() => setActiveTab('dinner')}
-              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+              className={`flex-1 min-w-[45%] sm:min-w-0 py-2.5 rounded-2xl transition flex items-center justify-center gap-1.5 ${
                 activeTab === 'dinner' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
@@ -735,12 +1025,21 @@
             </button>
             <button
               onClick={() => setActiveTab('settlement')}
-              className={`flex-1 py-2.5 rounded-2xl transition flex items-center justify-center gap-2 ${
+              className={`flex-1 min-w-[45%] sm:min-w-0 py-2.5 rounded-2xl transition flex items-center justify-center gap-1.5 ${
                 activeTab === 'settlement' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
               }`}
             >
               <i className="fa-solid fa-calculator"></i>
               本週結算 & 消帳
+            </button>
+            <button
+              onClick={() => setActiveTab('bills')}
+              className={`flex-1 min-w-[45%] sm:min-w-0 py-2.5 rounded-2xl transition flex items-center justify-center gap-1.5 ${
+                activeTab === 'bills' ? 'bg-white text-rose-600 shadow-md' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <i className="fa-solid fa-file-invoice-dollar"></i>
+              每月帳單
             </button>
           </div>
 
@@ -1118,6 +1417,334 @@
             </div>
           )}
 
+          {/* TAB 4: 每月帳單 (房租 / 電費 / 水費 / Council Tax) */}
+          {activeTab === 'bills' && (
+            <div className="space-y-5">
+              {/* 房租卡片 */}
+              <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-indigo-100">
+                <h2 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
+                  <span className="text-xl">🏠</span>
+                  每月房租
+                </h2>
+
+                {hasRentThisMonth ? (
+                  (() => {
+                    const rentBill = currentMonthBills.find(b => b.type === 'rent');
+                    return (
+                      <div className="bg-indigo-50/50 border-2 border-indigo-100 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-2">
+                        <div className="text-xs text-slate-600">
+                          <div>
+                            💳 {getRoommateObj(rentBill.payer).emoji} {rentBill.payer} 已先付總額
+                            <span className="text-indigo-600 font-extrabold text-base mx-1">£{rentBill.amount.toFixed(2)}</span>
+                          </div>
+                          <div className="mt-1">👥 每人分攤：£{RENT_PER_PERSON.toFixed(2)}</div>
+                        </div>
+                        <span className="bg-indigo-100 text-indigo-700 text-[10px] font-bold px-2.5 py-1 rounded-full">✓ 本月已登記</span>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="text-xs text-slate-500">
+                      每人固定 <strong className="text-slate-700">£{RENT_PER_PERSON.toFixed(2)}</strong>，
+                      由登入的人先付總額 £{(RENT_PER_PERSON * roommates.length).toFixed(2)}，
+                      其他室友再均分轉帳給他/她。
+                    </div>
+                    <button
+                      onClick={handleAddRent}
+                      disabled={!currentUser}
+                      className="bg-indigo-500 hover:bg-indigo-600 text-white font-bold px-4 py-2 rounded-2xl shadow-md transition text-xs shrink-0 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                    >
+                      {currentUser ? '＋ 新增本月房租' : '🔒 需登入'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* 新增電費/水費/Council Tax/其他帳單 */}
+              <form onSubmit={handleAddBill} className={`bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100 ${!currentUser ? 'opacity-60' : ''}`}>
+                <h2 className="text-base font-bold text-slate-800 mb-4 flex items-center gap-2">
+                  <span className="text-xl">🧾</span>
+                  新增帳單 (電費 / 水費 / Council Tax) {!currentUser && <span className="text-xs text-rose-500 font-bold">(🔒 需登入)</span>}
+                </h2>
+
+                <div className="mb-4">
+                  <label className="block text-xs font-bold text-slate-600 mb-2">帳單類型：</label>
+                  <div className="flex flex-wrap gap-2">
+                    {MANUAL_BILL_TYPES.map(t => {
+                      const isSelected = billType === t.id;
+                      return (
+                        <button
+                          type="button"
+                          key={t.id}
+                          disabled={!currentUser}
+                          onClick={() => setBillType(t.id)}
+                          className={`px-3 py-1.5 rounded-2xl text-xs font-bold border-2 transition flex items-center gap-1.5 ${
+                            isSelected
+                              ? `${t.color} ring-2 ring-rose-300 scale-105 shadow-sm`
+                              : 'bg-slate-50 text-slate-500 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <span>{t.emoji}</span>
+                          <span>{t.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">總金額 (£ 英鎊)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={billAmount}
+                      onChange={(e) => setBillAmount(e.target.value)}
+                      disabled={!currentUser}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm font-bold text-rose-600 focus:outline-none focus:border-rose-400 disabled:cursor-not-allowed"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">先付人 (Payer - 鎖定本人)</label>
+                    <div className="bg-slate-100 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-xs font-bold text-slate-700 flex items-center gap-2">
+                      {currentUser ? (
+                        <>
+                          <span>{currentRmUserObj.emoji}</span>
+                          <span>{currentUser} (自動鎖定)</span>
+                        </>
+                      ) : (
+                        <span className="text-slate-400">🔒 請先登入身份</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <label className="block text-xs font-bold text-slate-600 mb-2">分攤成員 (預設均分)</label>
+                  <div className="flex gap-2">
+                    {roommates.map(r => {
+                      const isChecked = billSplit.includes(r.id);
+                      return (
+                        <label
+                          key={r.id}
+                          className={`flex-1 flex items-center justify-center gap-2 p-2.5 rounded-2xl cursor-pointer border-2 transition text-xs font-bold ${
+                            isChecked
+                              ? 'bg-rose-50 border-rose-400 text-rose-700'
+                              : 'bg-slate-50 border-slate-200 text-slate-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={!currentUser}
+                            onChange={() => {
+                              if (isChecked) {
+                                if (billSplit.length === 1) return alert('至少需要一位分攤成員！');
+                                setBillSplit(billSplit.filter(id => id !== r.id));
+                              } else {
+                                setBillSplit([...billSplit, r.id]);
+                              }
+                            }}
+                            className="hidden"
+                          />
+                          <span className="text-base">{r.emoji}</span>
+                          <span>{r.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="mt-5 pt-3 border-t border-rose-100 flex items-center justify-between">
+                  <span className="text-xs text-slate-500 font-medium">
+                    📝 登記人：<strong className="text-slate-800">{currentUser ? `${currentRmUserObj.emoji} ${currentUser}` : '未登入'}</strong>
+                  </span>
+                  <button
+                    type="submit"
+                    disabled={!currentUser}
+                    className="bg-rose-500 hover:bg-rose-600 text-white font-bold px-6 py-2.5 rounded-2xl shadow-md hover:shadow-lg transition flex items-center gap-2 text-sm disabled:bg-slate-300 disabled:cursor-not-allowed"
+                  >
+                    <i className="fa-solid fa-file-invoice-dollar"></i>
+                    確認加入
+                  </button>
+                </div>
+              </form>
+
+              {/* 本月帳單列表 */}
+              <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <span className="text-xl">🧾</span>
+                    本月帳單 ({currentMonthBills.length} 筆)
+                  </h3>
+                  <span className="text-xs bg-rose-100 text-rose-700 font-extrabold px-3 py-1 rounded-full">
+                    總共 £{currentMonthBills.reduce((sum, b) => sum + b.amount, 0).toFixed(2)}
+                  </span>
+                </div>
+
+                {currentMonthBills.length === 0 ? (
+                  <div className="text-center py-10 text-slate-400 text-sm">
+                    <div className="text-4xl mb-2">🧾</div>
+                    本月還沒有帳單紀錄。
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {currentMonthBills.map(bill => {
+                      const typeObj = getBillTypeObj(bill.type);
+                      const isMyRecord = currentUser && bill.registeredBy === currentUser;
+
+                      return (
+                        <div key={bill.id} className="cute-card p-4 rounded-2xl border-2 border-rose-50 bg-rose-50/20 flex items-center justify-between">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${typeObj.color}`}>
+                                {typeObj.emoji} {typeObj.name}
+                              </span>
+                              <span className="text-rose-600 font-extrabold text-base ml-1">£{bill.amount.toFixed(2)}</span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 mt-1">
+                              <span>💳 {getRoommateObj(bill.payer).emoji} {bill.payer} 先付</span>
+                              <span>👥 分攤：{bill.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
+                              <span className="text-rose-400 font-medium">📝 登記人：{getRoommateObj(bill.registeredBy).name}</span>
+                            </div>
+                          </div>
+
+                          {isMyRecord ? (
+                            <button
+                              onClick={() => handleDeleteBill(bill)}
+                              className="text-slate-300 hover:text-rose-500 p-2 transition"
+                              title="刪除紀錄"
+                            >
+                              <i className="fa-solid fa-trash-can"></i>
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-300 font-medium bg-slate-100 px-2 py-1 rounded-lg" title="僅登記本人可刪除">
+                              🔒 僅 {bill.registeredBy}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* 本月結算摘要 */}
+              <div className="grid grid-cols-3 gap-3">
+                {roommates.map(r => {
+                  const paid = monthlyCalculation.paidMap[r.id] || 0;
+                  const owe = monthlyCalculation.oweMap[r.id] || 0;
+                  const net = monthlyCalculation.netMap[r.id] || 0;
+
+                  return (
+                    <div key={r.id} className="bg-white p-4 rounded-3xl shadow-sm border-2 border-rose-100 text-center">
+                      <div className="text-3xl mb-1">{r.emoji}</div>
+                      <div className="font-bold text-slate-800 text-sm">{r.name}</div>
+                      <div className="text-[11px] text-slate-400 mt-1">實付 £{paid.toFixed(2)}</div>
+                      <div className="text-[11px] text-slate-400">應付 £{owe.toFixed(2)}</div>
+
+                      <div className={`mt-2 pt-2 border-t text-sm font-extrabold ${
+                        net > 0.009 ? 'text-emerald-600' : net < -0.009 ? 'text-rose-600' : 'text-slate-400'
+                      }`}>
+                        {net > 0.009 ? `+£${net.toFixed(2)}` : net < -0.009 ? `-£${Math.abs(net).toFixed(2)}` : '£0.00'}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 本月轉帳清單與消帳 */}
+              <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
+                <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
+                  <span className="text-xl">💰</span>
+                  本月轉帳清單與雙方消帳確認
+                </h3>
+                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。</p>
+
+                {monthlyCalculation.transfers.length === 0 ? (
+                  <div className="text-center py-8 text-emerald-600 font-bold text-sm">
+                    🎉 本月帳目完美平衡，不需要互相轉帳！
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {monthlyCalculation.transfers.map(tr => {
+                      const monthSettles = billSettlements[currentMonthObj.key] || {};
+                      const status = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+                      const isCleared = status.payerPaid && status.receiverConfirmed;
+
+                      const fromObj = getRoommateObj(tr.from);
+                      const toObj = getRoommateObj(tr.to);
+
+                      const canIPay = currentUser === tr.from;
+                      const canIConfirm = currentUser === tr.to;
+
+                      return (
+                        <div key={tr.id} className={`p-4 rounded-2xl border-2 transition ${
+                          isCleared ? 'bg-emerald-50/50 border-emerald-300' : 'bg-slate-50 border-slate-200'
+                        }`}>
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm">
+                              <span>{fromObj.emoji} {fromObj.name}</span>
+                              <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
+                              <span>{toObj.emoji} {toObj.name}</span>
+                              <span className="text-rose-600 font-extrabold text-base ml-1">£{tr.amount.toFixed(2)}</span>
+                            </div>
+
+                            <div>
+                              {isCleared ? (
+                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">
+                                  ✓ 已消帳完成
+                                </span>
+                              ) : (
+                                <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
+                                  ⏳ 待結算
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
+                            <button
+                              onClick={() => handleToggleBillPaymentStatus(tr, 'payer_pay')}
+                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
+                                status.payerPaid
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
+                              } ${!canIPay ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            >
+                              <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
+                              <span>付款 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '標記已付款'}</span>
+                              {!canIPay && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
+                            </button>
+
+                            <button
+                              onClick={() => handleToggleBillPaymentStatus(tr, 'receiver_confirm')}
+                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
+                                status.receiverConfirmed
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : status.payerPaid
+                                    ? 'bg-rose-500 text-white shadow hover:bg-rose-600'
+                                    : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
+                              } ${!canIConfirm ? 'opacity-50 cursor-not-allowed' : ''}`}
+                            >
+                              <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
+                              <span>收款 ({toObj.name})：{status.receiverConfirmed ? '已確認消帳' : '確認收到並消帳'}</span>
+                              {!canIConfirm && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Modal: 身份登入 */}
           {showLoginModal && (() => {
             const target = roommates.find(r => r.id === bindTarget);
@@ -1265,6 +1892,74 @@
                     確認修改
                   </button>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 未結算提醒 */}
+          {showUnsettledModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border-2 border-amber-200 space-y-4 max-h-[85vh] overflow-y-auto">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-triangle-exclamation text-amber-500"></i>
+                    你有 {unsettledItems.length} 筆未結算款項
+                  </h3>
+                  <button onClick={() => setShowUnsettledModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {unsettledItems.map((item, idx) => {
+                    const fromObj = getRoommateObj(item.tr.from);
+                    const toObj = getRoommateObj(item.tr.to);
+                    const iOwe = item.tr.from === currentUser;
+
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => {
+                          if (item.kind === 'week') {
+                            setSelectedWeekKey(item.periodKey);
+                            setActiveTab('settlement');
+                          } else {
+                            setSelectedMonthKey(item.periodKey);
+                            setActiveTab('bills');
+                          }
+                          setShowUnsettledModal(false);
+                        }}
+                        className="w-full text-left bg-amber-50/60 hover:bg-amber-100/60 border-2 border-amber-100 rounded-2xl p-3 transition"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">
+                            {item.kindLabel} · {item.periodLabel}
+                          </span>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${iOwe ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                            {iOwe ? '你要付款' : '你要收款'}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 font-bold text-slate-800 text-sm mt-2">
+                          <span>{fromObj.emoji} {fromObj.name}</span>
+                          <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
+                          <span>{toObj.emoji} {toObj.name}</span>
+                          <span className="text-rose-600 font-extrabold text-base ml-1">£{item.tr.amount.toFixed(2)}</span>
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-1">
+                          {item.status.payerPaid ? '付款方已標記付款，待收款方確認' : '尚未標記付款'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  onClick={() => setShowUnsettledModal(false)}
+                  className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-2.5 rounded-2xl transition text-xs"
+                >
+                  知道了，稍後處理
+                </button>
               </div>
             </div>
           )}
