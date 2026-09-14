@@ -129,6 +129,11 @@
       const [bindTarget, setBindTarget] = useState('Janice');
       const [pinInput, setPinInput] = useState('');
 
+      const [showChangePinModal, setShowChangePinModal] = useState(false);
+      const [oldPinInput, setOldPinInput] = useState('');
+      const [newPinInput, setNewPinInput] = useState('');
+      const [newPinConfirmInput, setNewPinConfirmInput] = useState('');
+
       const [expenses, setExpenses] = useState([]);
       const [dinnerAbsent, setDinnerAbsent] = useState({});
       const [settlements, setSettlements] = useState({});
@@ -264,6 +269,45 @@
         localStorage.setItem(CURRENT_USER_STORAGE_KEY, target.id);
         setShowLoginModal(false);
         setPinInput('');
+      };
+
+      const handleResetPin = (roommateId) => {
+        const target = roommates.find(r => r.id === roommateId);
+        if (!target) return;
+        if (!confirm(`確定要重設 ${target.name} 的 PIN 碼嗎？重設後需要立刻設定一組新的 PIN。`)) return;
+
+        const updatedRoommates = roommates.map(r => r.id === roommateId ? { ...r, pin: null } : r);
+        setRoommates(updatedRoommates);
+        saveData(undefined, undefined, undefined, updatedRoommates);
+        setPinInput('');
+      };
+
+      const handleChangePin = () => {
+        const me = roommates.find(r => r.id === currentUser);
+        if (!me) return;
+
+        if (oldPinInput !== me.pin) {
+          alert('❌ 目前的 PIN 碼不正確！');
+          return;
+        }
+        if (!/^\d{4,6}$/.test(newPinInput)) {
+          alert('請輸入 4-6 位數字的新 PIN 碼！');
+          return;
+        }
+        if (newPinInput !== newPinConfirmInput) {
+          alert('❌ 兩次輸入的新 PIN 碼不一致！');
+          return;
+        }
+
+        const updatedRoommates = roommates.map(r => r.id === me.id ? { ...r, pin: newPinInput } : r);
+        setRoommates(updatedRoommates);
+        saveData(undefined, undefined, undefined, updatedRoommates);
+
+        setShowChangePinModal(false);
+        setOldPinInput('');
+        setNewPinInput('');
+        setNewPinConfirmInput('');
+        alert('✅ PIN 碼已更新！');
       };
 
       const handleLogout = () => {
@@ -549,7 +593,10 @@
                   <div className="bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs px-3 py-1.5 rounded-full flex items-center gap-2 font-bold shadow-sm">
                     <span className="text-base">{currentRmUserObj.emoji}</span>
                     <span>{currentUser}</span>
-                    <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600 ml-1" title="登出">
+                    <button onClick={() => setShowChangePinModal(true)} className="text-slate-400 hover:text-rose-600 ml-1" title="修改 PIN">
+                      <i className="fa-solid fa-key"></i>
+                    </button>
+                    <button onClick={handleLogout} className="text-slate-400 hover:text-rose-600" title="登出">
                       <i className="fa-solid fa-right-from-bracket"></i>
                     </button>
                   </div>
@@ -1128,6 +1175,15 @@
                       {isFirstTimeSetup && (
                         <p className="text-[10px] text-amber-600 mt-1">⚠️ 這組 PIN 碼之後每次登入都要用，請記住！</p>
                       )}
+                      {!isFirstTimeSetup && (
+                        <button
+                          type="button"
+                          onClick={() => handleResetPin(bindTarget)}
+                          className="text-[10px] text-rose-500 hover:text-rose-600 font-bold mt-1 underline"
+                        >
+                          忘記 PIN 碼？點此重設
+                        </button>
+                      )}
                     </div>
 
                     <button
@@ -1141,6 +1197,77 @@
               </div>
             );
           })()}
+
+          {/* Modal: 修改 PIN */}
+          {showChangePinModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-rose-100 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-key text-rose-500"></i>
+                    修改 PIN 碼
+                  </h3>
+                  <button
+                    onClick={() => {
+                      setShowChangePinModal(false);
+                      setOldPinInput('');
+                      setNewPinInput('');
+                      setNewPinConfirmInput('');
+                    }}
+                    className="text-slate-400 hover:text-slate-600"
+                  >
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">目前的 PIN 碼：</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength="6"
+                      value={oldPinInput}
+                      onChange={(e) => setOldPinInput(e.target.value.replace(/\D/g, ''))}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm tracking-widest focus:outline-none focus:border-rose-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">新的 PIN 碼 (4-6 位數字)：</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength="6"
+                      value={newPinInput}
+                      onChange={(e) => setNewPinInput(e.target.value.replace(/\D/g, ''))}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm tracking-widest focus:outline-none focus:border-rose-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">再次輸入新的 PIN 碼：</label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength="6"
+                      value={newPinConfirmInput}
+                      onChange={(e) => setNewPinConfirmInput(e.target.value.replace(/\D/g, ''))}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleChangePin(); }}
+                      className="w-full bg-slate-50 border-2 border-slate-200 rounded-2xl px-3.5 py-2 text-sm tracking-widest focus:outline-none focus:border-rose-400"
+                    />
+                  </div>
+
+                  <button
+                    onClick={handleChangePin}
+                    className="w-full bg-rose-500 text-white font-bold py-2.5 rounded-2xl shadow-md hover:bg-rose-600 transition text-xs"
+                  >
+                    確認修改
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Modal: 數據備份 */}
           {showBackupModal && (
