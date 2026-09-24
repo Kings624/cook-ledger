@@ -38,6 +38,8 @@
     const DB_ROW_ID = 'room204';
     const PERMANENT_STORAGE_KEY = 'ROOM204_LOCAL_CACHE_V6';
     const CURRENT_USER_STORAGE_KEY = 'ROOM204_CURRENT_USER';
+    const RECEIPT_BUCKET = 'receipts';
+    const RECEIPT_RETENTION_DAYS = 7;
 
     function formatLocalDate(d = new Date()) {
       const year = d.getFullYear();
@@ -553,6 +555,11 @@
       const [itemDate, setItemDate] = useState(formatLocalDate(currentNowDate));
       const [itemSplit, setItemSplit] = useState(['Janice', 'Carrie', 'Kingsley']);
 
+      const [receiptPreviewUrl, setReceiptPreviewUrl] = useState(null);
+      const [receiptUploading, setReceiptUploading] = useState(false);
+      const [receiptStoragePath, setReceiptStoragePath] = useState(null);
+      const receiptCleanedPathsRef = React.useRef(new Set());
+
       const toggleCategoryTag = (catId) => {
         if (itemCategories.includes(catId)) {
           if (itemCategories.length === 1) return alert('至少需選擇一個採購分類！');
@@ -570,6 +577,67 @@
           setItemSplit(roommates.map(r => r.id));
         }
       }, [itemDate, dinnerAbsent, roommates]);
+
+      const handleReceiptFileChange = async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          e.target.value = '';
+          return;
+        }
+        if (!supabase) {
+          alert('⚠️ Supabase 尚未連線，無法上傳收據。');
+          e.target.value = '';
+          return;
+        }
+        if (file.size > 8 * 1024 * 1024) {
+          alert('圖片太大了，請選擇 8MB 以內的照片。');
+          e.target.value = '';
+          return;
+        }
+
+        setReceiptPreviewUrl(URL.createObjectURL(file));
+        setReceiptUploading(true);
+
+        try {
+          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const path = `${itemDate}/${Date.now()}_${safeName}`;
+
+          const { error: uploadError } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file);
+          if (uploadError) throw uploadError;
+          setReceiptStoragePath(path);
+
+          const base64 = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result).split(',')[1]);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
+          const res = await fetch(`${SUPABASE_URL}/functions/v1/parse-receipt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+            body: JSON.stringify({ imageBase64: base64, mediaType: file.type || 'image/jpeg' })
+          });
+          const result = await res.json();
+
+          if (!res.ok || result.error) {
+            alert(`⚠️ 收據辨識失敗：${result.error || '未知錯誤'}\n（圖片已上傳，可以手動輸入資料）`);
+          } else {
+            if (result.title) setItemTitle(result.title);
+            if (result.amount) setItemAmount(String(result.amount));
+            if (result.date) setItemDate(result.date);
+            if (result.category) setItemCategories([result.category]);
+            alert('✨ 已自動帶入辨識結果，請確認金額與內容無誤後再送出！');
+          }
+        } catch (err) {
+          alert(`⚠️ 收據上傳或辨識失敗：${err.message || err}`);
+        } finally {
+          setReceiptUploading(false);
+        }
+      };
 
       const handleAddExpense = (e) => {
         e.preventDefault();
@@ -593,7 +661,8 @@
           date: itemDate,
           splitWith: itemSplit,
           registeredBy: currentUser,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          receiptPath: receiptStoragePath || null
         };
 
         const updated = [newEntry, ...expenses];
@@ -602,6 +671,8 @@
 
         setItemTitle('');
         setItemAmount('');
+        setReceiptPreviewUrl(null);
+        setReceiptStoragePath(null);
         alert('✨ 成功加入採購明細！Supabase 實時廣播已發送');
       };
 
@@ -968,6 +1039,61 @@
         setShowRentReminderModal(true);
       }, [currentUser]);
 
+      // ===== 收據圖片清理：該週結清後，或超過 7 天，就從 Storage 刪除 =====
+
+      useEffect(() => {
+        if (!supabase || syncStatus !== 'online') return;
+
+        const now = Date.now();
+        const toDelete = [];
+
+        expenses.forEach(exp => {
+          if (!exp.receiptPath) return;
+          if (receiptCleanedPathsRef.current.has(exp.receiptPath)) return;
+
+          const ageDays = (now - new Date(exp.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+
+          const week = weeksList.find(w => {
+            const parts = exp.date.split('-');
+            const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+            return d >= w.startDate && d <= w.endDate;
+          });
+
+          let weekFullySettled = false;
+          if (week) {
+            const weekExpenses = expenses.filter(e2 => {
+              const parts = e2.date.split('-');
+              const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+              return d >= week.startDate && d <= week.endDate;
+            });
+            const weekPays = (settlements[week.key] && settlements[week.key].payments) || [];
+            const pairs = buildSettlementPairs(weekExpenses, weekPays, roommates);
+            weekFullySettled = pairs.every(p => p.remaining <= 0.009);
+          }
+
+          if (weekFullySettled || ageDays > RECEIPT_RETENTION_DAYS) {
+            toDelete.push(exp);
+          }
+        });
+
+        if (toDelete.length === 0) return;
+        toDelete.forEach(exp => receiptCleanedPathsRef.current.add(exp.receiptPath));
+
+        (async () => {
+          try {
+            await supabase.storage.from(RECEIPT_BUCKET).remove(toDelete.map(exp => exp.receiptPath));
+          } catch (e) {
+            // 刪圖失敗不影響帳目資料，下次載入時會依 ref 判斷是否需要重試
+          }
+
+          const updatedExpenses = expenses.map(exp =>
+            toDelete.some(d => d.id === exp.id) ? { ...exp, receiptPath: null } : exp
+          );
+          setExpenses(updatedExpenses);
+          saveData(updatedExpenses, undefined, undefined, undefined);
+        })();
+      }, [syncStatus, expenses, settlements, roommates, weeksList]);
+
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
       const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
       const getBillTypeObj = (typeId) => BILL_TYPES.find(t => t.id === typeId) || BILL_TYPES[BILL_TYPES.length - 1];
@@ -1208,6 +1334,30 @@
                   新增採購紀錄 {!currentUser && <span className="text-xs text-rose-500 font-bold">(🔒 需登入)</span>}
                 </h2>
 
+                <div className="mb-4 p-3 bg-rose-50/40 rounded-2xl border-2 border-dashed border-rose-200">
+                  <label className="block text-xs font-bold text-slate-600 mb-2">📷 上傳收據照片自動辨識 (非必填)</label>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={handleReceiptFileChange}
+                      disabled={!currentUser || receiptUploading}
+                      className="text-xs text-slate-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-xl file:border-0 file:bg-rose-500 file:text-white file:font-bold file:text-xs disabled:cursor-not-allowed"
+                    />
+                    {receiptUploading && (
+                      <span className="text-xs text-amber-600 font-bold flex items-center gap-1">
+                        <i className="fa-solid fa-spinner fa-spin"></i>
+                        辨識中，請稍候...
+                      </span>
+                    )}
+                  </div>
+                  {receiptPreviewUrl && (
+                    <img src={receiptPreviewUrl} alt="收據預覽" className="mt-3 max-h-40 rounded-xl border border-rose-200" />
+                  )}
+                  <p className="text-[10px] text-slate-400 mt-2">辨識結果只是自動帶入，請確認下方欄位無誤後再按「確認加入」。照片會在這週結清或 7 天後自動從雲端清除。</p>
+                </div>
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-bold text-slate-600 mb-1">物品 / 超市名稱</label>
@@ -1383,6 +1533,17 @@
                               <span>💳 {getRoommateObj(exp.payer).emoji} {exp.payer} 先付</span>
                               <span>👥 分攤：{exp.splitWith.map(id => getRoommateObj(id).emoji).join(' ')}</span>
                               <span className="text-rose-400 font-medium">📝 登記人：{getRoommateObj(exp.registeredBy).name}</span>
+                              {exp.receiptPath && supabase && (
+                                <a
+                                  href={supabase.storage.from(RECEIPT_BUCKET).getPublicUrl(exp.receiptPath).data.publicUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sky-500 font-bold flex items-center gap-1"
+                                >
+                                  <i className="fa-solid fa-receipt"></i>
+                                  查看收據
+                                </a>
+                              )}
                             </div>
                           </div>
 
