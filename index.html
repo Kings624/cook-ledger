@@ -607,33 +607,11 @@
 
           const { error: uploadError } = await supabase.storage.from(RECEIPT_BUCKET).upload(path, file);
           if (uploadError) throw uploadError;
+
           setReceiptStoragePath(path);
-
-          const base64 = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(String(reader.result).split(',')[1]);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-
-          const res = await fetch(`${SUPABASE_URL}/functions/v1/parse-receipt`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-            body: JSON.stringify({ imageBase64: base64, mediaType: file.type || 'image/jpeg' })
-          });
-          const result = await res.json();
-
-          if (!res.ok || result.error) {
-            alert(`⚠️ 收據辨識失敗：${result.error || '未知錯誤'}\n（圖片已上傳，可以手動輸入資料）`);
-          } else {
-            if (result.title) setItemTitle(result.title);
-            if (result.amount) setItemAmount(String(result.amount));
-            if (result.date) setItemDate(result.date);
-            if (result.category) setItemCategories([result.category]);
-            alert('✨ 已自動帶入辨識結果，請確認金額與內容無誤後再送出！');
-          }
+          // 自動辨識功能暫時收起，之後接上 Edge Function 後再啟用
         } catch (err) {
-          alert(`⚠️ 收據上傳或辨識失敗：${err.message || err}`);
+          alert(`⚠️ 收據上傳失敗：${err.message || err}`);
         } finally {
           setReceiptUploading(false);
         }
@@ -1335,7 +1313,7 @@
                 </h2>
 
                 <div className="mb-4 p-3 bg-rose-50/40 rounded-2xl border-2 border-dashed border-rose-200">
-                  <label className="block text-xs font-bold text-slate-600 mb-2">📷 上傳收據照片自動辨識 (非必填)</label>
+                  <label className="block text-xs font-bold text-slate-600 mb-2">📷 上傳收據照片 (非必填，僅保存，金額仍需手動輸入)</label>
                   <div className="flex items-center gap-3 flex-wrap">
                     <input
                       type="file"
@@ -1348,14 +1326,20 @@
                     {receiptUploading && (
                       <span className="text-xs text-amber-600 font-bold flex items-center gap-1">
                         <i className="fa-solid fa-spinner fa-spin"></i>
-                        辨識中，請稍候...
+                        上傳中，請稍候...
+                      </span>
+                    )}
+                    {!receiptUploading && receiptStoragePath && (
+                      <span className="text-xs text-emerald-600 font-bold flex items-center gap-1">
+                        <i className="fa-solid fa-circle-check"></i>
+                        已上傳
                       </span>
                     )}
                   </div>
                   {receiptPreviewUrl && (
                     <img src={receiptPreviewUrl} alt="收據預覽" className="mt-3 max-h-40 rounded-xl border border-rose-200" />
                   )}
-                  <p className="text-[10px] text-slate-400 mt-2">辨識結果只是自動帶入，請確認下方欄位無誤後再按「確認加入」。照片會在這週結清或 7 天後自動從雲端清除。</p>
+                  <p className="text-[10px] text-slate-400 mt-2">照片只是保存備查，請照常手動填寫下方欄位。照片會在這週結清或 7 天後自動從雲端清除。</p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
