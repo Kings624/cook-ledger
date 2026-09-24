@@ -159,6 +159,66 @@
       return { paidMap, oweMap, netMap, transfers };
     }
 
+    // 產生所有室友兩兩配對的 key（例如 "Carrie<Janice"，字母序排列，方向固定不變）
+    function getPairKeys(roommates) {
+      const ids = roommates.map(r => r.id);
+      const pairs = [];
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          pairs.push(`${ids[i]}<${ids[j]}`);
+        }
+      }
+      return pairs;
+    }
+
+    // 計算某一組室友配對「目前實際結清後」的淨額（正數代表 a 欠 b；負數代表 b 欠 a）
+    // 這個數字只跟這兩人之間的採購/帳單有關，不受第三人金額變動影響，也不受已確認付款以外的操作影響，所以不會有「已消帳卻又疊加」的問題
+    function getPairSignedBalance(pairKey, items, payments) {
+      const [a, b] = pairKey.split('<');
+      let signed = 0;
+
+      items.forEach(item => {
+        const share = item.amount / item.splitWith.length;
+        item.splitWith.forEach(person => {
+          if (person === item.payer) return;
+          if (person === a && item.payer === b) signed += share;
+          else if (person === b && item.payer === a) signed -= share;
+        });
+      });
+
+      payments.forEach(p => {
+        if (!p.receiverConfirmed) return;
+        if (p.from === a && p.to === b) signed -= p.amount;
+        else if (p.from === b && p.to === a) signed += p.amount;
+      });
+
+      return Math.round(signed * 100) / 100;
+    }
+
+    // 組出這個週期 (週採購 / 月帳單) 裡每一組室友配對的「剩餘應付」與付款紀錄，供摺疊卡片顯示
+    function buildSettlementPairs(items, payments, roommates) {
+      return getPairKeys(roommates).map(pairKey => {
+        const [a, b] = pairKey.split('<');
+        const signed = getPairSignedBalance(pairKey, items, payments);
+        const pairPayments = payments
+          .filter(p => p.pairKey === pairKey)
+          .slice()
+          .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt));
+        const pendingTotal = Math.round(
+          pairPayments.filter(p => p.payerPaid && !p.receiverConfirmed).reduce((sum, p) => sum + p.amount, 0) * 100
+        ) / 100;
+
+        return {
+          pairKey,
+          from: signed >= 0 ? a : b,
+          to: signed >= 0 ? b : a,
+          remaining: Math.abs(signed),
+          pendingTotal,
+          payments: pairPayments
+        };
+      }).filter(p => p.remaining > 0.009 || p.pendingTotal > 0.009 || p.payments.length > 0);
+    }
+
     const MAX_MONTHS_HISTORY = 12; // 最多保留 12 個月的帳單紀錄
 
     const BILL_TYPES = [
@@ -227,6 +287,13 @@
       const [showUnsettledModal, setShowUnsettledModal] = useState(false);
       const [unsettledItems, setUnsettledItems] = useState([]);
       const unsettledCheckedForRef = React.useRef(null);
+
+      const [expandedWeekPairs, setExpandedWeekPairs] = useState({});
+      const [weekPayAmountInputs, setWeekPayAmountInputs] = useState({});
+      const [expandedMonthPairs, setExpandedMonthPairs] = useState({});
+      const [monthPayAmountInputs, setMonthPayAmountInputs] = useState({});
+
+      const [showRentReminderModal, setShowRentReminderModal] = useState(false);
 
       const [roommates, setRoommates] = useState(INITIAL_ROOMMATES);
       const [currentUser, setCurrentUser] = useState(null);
@@ -598,34 +665,74 @@
         return calculateTransfers(currentWeekExpenses, roommates);
       }, [currentWeekExpenses, roommates]);
 
-      const handleTogglePaymentStatus = (tr, actionType) => {
+      const weekPayments = (settlements[selectedWeekKey] && settlements[selectedWeekKey].payments) || [];
+      const weekSettlementPairs = useMemo(() => {
+        return buildSettlementPairs(currentWeekExpenses, weekPayments, roommates);
+      }, [currentWeekExpenses, weekPayments, roommates]);
+
+      const handleMarkWeekPayment = (pair) => {
         if (!currentUser) {
           alert('🔒 請先登入身份！');
           return;
         }
-
-        if (actionType === 'payer_pay' && currentUser !== tr.from) {
-          alert(`🔒 權限限制：付款方為 ${tr.from}，只能由 ${tr.from} 本人點擊！`);
+        if (currentUser !== pair.from) {
+          alert(`🔒 權限限制：付款方為 ${pair.from}，只能由 ${pair.from} 本人標記付款！`);
           return;
         }
 
-        if (actionType === 'receiver_confirm' && currentUser !== tr.to) {
-          alert(`🔒 權限限制：收款方為 ${tr.to}，只能由 ${tr.to} 本人點擊！`);
+        const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+        const raw = weekPayAmountInputs[pair.pairKey];
+        const amt = parseFloat(raw !== undefined && raw !== '' ? raw : undeclared);
+
+        if (!amt || amt <= 0) {
+          alert('請輸入有效的付款金額！');
+          return;
+        }
+        if (amt > undeclared + 0.01) {
+          alert(`付款金額不能超過剩餘未付金額 £${undeclared.toFixed(2)}！`);
           return;
         }
 
-        const weekSettles = settlements[selectedWeekKey] || {};
-        const currentStatus = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+        const newRecord = {
+          id: 'pay_' + Date.now(),
+          pairKey: pair.pairKey,
+          from: pair.from,
+          to: pair.to,
+          amount: parseFloat(amt.toFixed(2)),
+          payerPaid: true,
+          receiverConfirmed: false,
+          createdAt: new Date().toISOString()
+        };
 
-        let updatedStatus = { ...currentStatus };
-        if (actionType === 'payer_pay') {
-          updatedStatus.payerPaid = !updatedStatus.payerPaid;
-        } else if (actionType === 'receiver_confirm') {
-          updatedStatus.receiverConfirmed = !updatedStatus.receiverConfirmed;
+        const weekData = settlements[selectedWeekKey] || {};
+        const payments = weekData.payments || [];
+        const updatedWeekData = { ...weekData, payments: [...payments, newRecord] };
+        const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekData };
+
+        setSettlements(updatedSettlements);
+        saveData(undefined, undefined, updatedSettlements, undefined);
+
+        setWeekPayAmountInputs({ ...weekPayAmountInputs, [pair.pairKey]: '' });
+        setExpandedWeekPairs({ ...expandedWeekPairs, [pair.pairKey]: true });
+      };
+
+      const handleConfirmWeekPayment = (record) => {
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          return;
+        }
+        if (currentUser !== record.to) {
+          alert(`🔒 權限限制：收款方為 ${record.to}，只能由 ${record.to} 本人確認！`);
+          return;
         }
 
-        const updatedWeekSettles = { ...weekSettles, [tr.id]: updatedStatus };
-        const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekSettles };
+        const weekData = settlements[selectedWeekKey] || {};
+        const payments = weekData.payments || [];
+        const updatedPayments = payments.map(p =>
+          p.id === record.id ? { ...p, receiverConfirmed: true, confirmedAt: new Date().toISOString() } : p
+        );
+        const updatedWeekData = { ...weekData, payments: updatedPayments };
+        const updatedSettlements = { ...settlements, [selectedWeekKey]: updatedWeekData };
 
         setSettlements(updatedSettlements);
         saveData(undefined, undefined, updatedSettlements, undefined);
@@ -714,34 +821,74 @@
         }
       };
 
-      const handleToggleBillPaymentStatus = (tr, actionType) => {
+      const monthPayments = (billSettlements[currentMonthObj.key] && billSettlements[currentMonthObj.key].payments) || [];
+      const monthSettlementPairs = useMemo(() => {
+        return buildSettlementPairs(currentMonthBills, monthPayments, roommates);
+      }, [currentMonthBills, monthPayments, roommates]);
+
+      const handleMarkMonthPayment = (pair) => {
         if (!currentUser) {
           alert('🔒 請先登入身份！');
           return;
         }
-
-        if (actionType === 'payer_pay' && currentUser !== tr.from) {
-          alert(`🔒 權限限制：付款方為 ${tr.from}，只能由 ${tr.from} 本人點擊！`);
+        if (currentUser !== pair.from) {
+          alert(`🔒 權限限制：付款方為 ${pair.from}，只能由 ${pair.from} 本人標記付款！`);
           return;
         }
 
-        if (actionType === 'receiver_confirm' && currentUser !== tr.to) {
-          alert(`🔒 權限限制：收款方為 ${tr.to}，只能由 ${tr.to} 本人點擊！`);
+        const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+        const raw = monthPayAmountInputs[pair.pairKey];
+        const amt = parseFloat(raw !== undefined && raw !== '' ? raw : undeclared);
+
+        if (!amt || amt <= 0) {
+          alert('請輸入有效的付款金額！');
+          return;
+        }
+        if (amt > undeclared + 0.01) {
+          alert(`付款金額不能超過剩餘未付金額 £${undeclared.toFixed(2)}！`);
           return;
         }
 
-        const monthSettles = billSettlements[currentMonthObj.key] || {};
-        const currentStatus = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
+        const newRecord = {
+          id: 'pay_' + Date.now(),
+          pairKey: pair.pairKey,
+          from: pair.from,
+          to: pair.to,
+          amount: parseFloat(amt.toFixed(2)),
+          payerPaid: true,
+          receiverConfirmed: false,
+          createdAt: new Date().toISOString()
+        };
 
-        let updatedStatus = { ...currentStatus };
-        if (actionType === 'payer_pay') {
-          updatedStatus.payerPaid = !updatedStatus.payerPaid;
-        } else if (actionType === 'receiver_confirm') {
-          updatedStatus.receiverConfirmed = !updatedStatus.receiverConfirmed;
+        const monthData = billSettlements[currentMonthObj.key] || {};
+        const payments = monthData.payments || [];
+        const updatedMonthData = { ...monthData, payments: [...payments, newRecord] };
+        const updatedBillSettlements = { ...billSettlements, [currentMonthObj.key]: updatedMonthData };
+
+        setBillSettlements(updatedBillSettlements);
+        saveData(undefined, undefined, undefined, undefined, undefined, updatedBillSettlements);
+
+        setMonthPayAmountInputs({ ...monthPayAmountInputs, [pair.pairKey]: '' });
+        setExpandedMonthPairs({ ...expandedMonthPairs, [pair.pairKey]: true });
+      };
+
+      const handleConfirmMonthPayment = (record) => {
+        if (!currentUser) {
+          alert('🔒 請先登入身份！');
+          return;
+        }
+        if (currentUser !== record.to) {
+          alert(`🔒 權限限制：收款方為 ${record.to}，只能由 ${record.to} 本人確認！`);
+          return;
         }
 
-        const updatedMonthSettles = { ...monthSettles, [tr.id]: updatedStatus };
-        const updatedBillSettlements = { ...billSettlements, [currentMonthObj.key]: updatedMonthSettles };
+        const monthData = billSettlements[currentMonthObj.key] || {};
+        const payments = monthData.payments || [];
+        const updatedPayments = payments.map(p =>
+          p.id === record.id ? { ...p, receiverConfirmed: true, confirmedAt: new Date().toISOString() } : p
+        );
+        const updatedMonthData = { ...monthData, payments: updatedPayments };
+        const updatedBillSettlements = { ...billSettlements, [currentMonthObj.key]: updatedMonthData };
 
         setBillSettlements(updatedBillSettlements);
         saveData(undefined, undefined, undefined, undefined, undefined, updatedBillSettlements);
@@ -769,17 +916,16 @@
           });
           if (weekExpenses.length === 0) return;
 
-          const { transfers } = calculateTransfers(weekExpenses, roommates);
-          const weekSettles = settlements[week.key] || {};
+          const weekPays = (settlements[week.key] && settlements[week.key].payments) || [];
+          const pairs = buildSettlementPairs(weekExpenses, weekPays, roommates);
 
-          transfers.forEach(tr => {
-            const status = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
-            if (status.payerPaid && status.receiverConfirmed) return;
-            // 先提示付款人付款；付款人標記已付款後，才提示收款人確認消帳
-            if (tr.from === currentUser && !status.payerPaid) {
-              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status, role: 'payer' });
-            } else if (tr.to === currentUser && status.payerPaid && !status.receiverConfirmed) {
-              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, tr, status, role: 'receiver' });
+          // 先提示付款人付款（有未付且未申報的金額）；付款人申報已付款後，才提示收款人確認消帳
+          pairs.forEach(pair => {
+            const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+            if (pair.from === currentUser && undeclared > 0.009) {
+              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, pair, role: 'payer', amount: undeclared });
+            } else if (pair.to === currentUser && pair.pendingTotal > 0.009) {
+              items.push({ kind: 'week', kindLabel: '週採購', periodLabel: week.label, periodKey: week.key, pair, role: 'receiver', amount: pair.pendingTotal });
             }
           });
         });
@@ -788,16 +934,15 @@
           const monthBills = bills.filter(b => b.month === month.key);
           if (monthBills.length === 0) return;
 
-          const { transfers } = calculateTransfers(monthBills, roommates);
-          const monthSettles = billSettlements[month.key] || {};
+          const monthPays = (billSettlements[month.key] && billSettlements[month.key].payments) || [];
+          const pairs = buildSettlementPairs(monthBills, monthPays, roommates);
 
-          transfers.forEach(tr => {
-            const status = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
-            if (status.payerPaid && status.receiverConfirmed) return;
-            if (tr.from === currentUser && !status.payerPaid) {
-              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status, role: 'payer' });
-            } else if (tr.to === currentUser && status.payerPaid && !status.receiverConfirmed) {
-              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, tr, status, role: 'receiver' });
+          pairs.forEach(pair => {
+            const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+            if (pair.from === currentUser && undeclared > 0.009) {
+              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, pair, role: 'payer', amount: undeclared });
+            } else if (pair.to === currentUser && pair.pendingTotal > 0.009) {
+              items.push({ kind: 'month', kindLabel: '月帳單', periodLabel: month.label, periodKey: month.key, pair, role: 'receiver', amount: pair.pendingTotal });
             }
           });
         });
@@ -807,6 +952,21 @@
           setShowUnsettledModal(true);
         }
       }, [currentUser, syncStatus, expenses, settlements, bills, billSettlements, roommates, weeksList, monthsList]);
+
+      // ===== 每月 1 號房租提醒 (只是提醒，不涉及登記/追蹤) =====
+
+      useEffect(() => {
+        if (!currentUser) return;
+        const today = new Date();
+        if (today.getDate() !== 1) return;
+
+        const monthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+        const storageKey = `ROOM204_RENT_REMINDER_${currentUser}_${monthKey}`;
+        if (localStorage.getItem(storageKey)) return;
+
+        localStorage.setItem(storageKey, '1');
+        setShowRentReminderModal(true);
+      }, [currentUser]);
 
       const getRoommateObj = (id) => roommates.find(r => r.id === id) || { name: id, emoji: '👤' };
       const getCategoryObj = (catId) => CATEGORIES.find(c => c.id === catId) || CATEGORIES[0];
@@ -1329,81 +1489,112 @@
               <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
                 <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
                   <span className="text-xl">💰</span>
-                  轉帳清單與雙方消帳確認
+                  轉帳清單與消帳記錄
                 </h3>
-                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。</p>
+                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。可以分次付款，點卡片展開查看每筆紀錄。</p>
 
-                {weeklyCalculation.transfers.length === 0 ? (
+                {weekSettlementPairs.length === 0 ? (
                   <div className="text-center py-8 text-emerald-600 font-bold text-sm">
                     🎉 本週帳目完美平衡，不需要互相轉帳！
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    {weeklyCalculation.transfers.map(tr => {
-                      const weekSettles = settlements[selectedWeekKey] || {};
-                      const status = weekSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
-                      const isCleared = status.payerPaid && status.receiverConfirmed;
-
-                      const fromObj = getRoommateObj(tr.from);
-                      const toObj = getRoommateObj(tr.to);
-
-                      const canIPay = currentUser === tr.from;
-                      const canIConfirm = currentUser === tr.to;
+                  <div className="space-y-3">
+                    {weekSettlementPairs.map(pair => {
+                      const fromObj = getRoommateObj(pair.from);
+                      const toObj = getRoommateObj(pair.to);
+                      const isExpanded = !!expandedWeekPairs[pair.pairKey];
+                      const isCleared = pair.remaining <= 0.009;
+                      const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+                      const canIPay = currentUser === pair.from;
 
                       return (
-                        <div key={tr.id} className={`p-4 rounded-2xl border-2 transition ${
+                        <div key={pair.pairKey} className={`rounded-2xl border-2 transition ${
                           isCleared ? 'bg-emerald-50/50 border-emerald-300' : 'bg-slate-50 border-slate-200'
                         }`}>
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedWeekPairs({ ...expandedWeekPairs, [pair.pairKey]: !isExpanded })}
+                            className="w-full flex items-center justify-between gap-2 p-4 text-left"
+                          >
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm flex-wrap">
                               <span>{fromObj.emoji} {fromObj.name}</span>
                               <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
                               <span>{toObj.emoji} {toObj.name}</span>
-                              <span className="text-rose-600 font-extrabold text-base ml-1">£{tr.amount.toFixed(2)}</span>
                             </div>
-
-                            <div>
+                            <div className="flex items-center gap-2 shrink-0">
                               {isCleared ? (
-                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">
-                                  ✓ 已消帳完成
-                                </span>
+                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">✓ 已結清</span>
                               ) : (
-                                <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
-                                  ⏳ 待結算
-                                </span>
+                                <div className="text-right">
+                                  <div className="text-rose-600 font-extrabold text-sm">剩餘 £{pair.remaining.toFixed(2)}</div>
+                                  {pair.pendingTotal > 0.009 && (
+                                    <div className="text-[10px] text-amber-600">其中 £{pair.pendingTotal.toFixed(2)} 待確認</div>
+                                  )}
+                                </div>
+                              )}
+                              <i className={`fa-solid fa-chevron-${isExpanded ? 'up' : 'down'} text-slate-400 text-xs`}></i>
+                            </div>
+                          </button>
+
+                          {!isCleared && undeclared > 0.009 && (
+                            <div className="px-4 pb-3 flex items-center gap-2">
+                              <input
+                                type="number"
+                                step="0.01"
+                                placeholder={undeclared.toFixed(2)}
+                                value={weekPayAmountInputs[pair.pairKey] ?? ''}
+                                onChange={(e) => setWeekPayAmountInputs({ ...weekPayAmountInputs, [pair.pairKey]: e.target.value })}
+                                disabled={!canIPay}
+                                className="flex-1 bg-white border-2 border-slate-200 rounded-xl px-3 py-1.5 text-xs disabled:bg-slate-100 disabled:cursor-not-allowed"
+                              />
+                              <button
+                                onClick={() => handleMarkWeekPayment(pair)}
+                                disabled={!canIPay}
+                                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition shrink-0 ${
+                                  canIPay ? 'bg-rose-500 text-white hover:bg-rose-600 shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <i className="fa-solid fa-hand-holding-dollar"></i>
+                                {fromObj.name} 標記付款
+                                {!canIPay && <i className="fa-solid fa-lock text-[9px]"></i>}
+                              </button>
+                            </div>
+                          )}
+
+                          {isExpanded && (
+                            <div className="px-4 pb-4 pt-2 border-t border-slate-200/60 space-y-2">
+                              {pair.payments.length === 0 ? (
+                                <p className="text-xs text-slate-400">尚無付款紀錄</p>
+                              ) : (
+                                pair.payments.map(p => (
+                                  <div key={p.id} className="flex items-center justify-between gap-2 bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs">
+                                    <div>
+                                      <div className="font-bold text-slate-700">
+                                        {getRoommateObj(p.from).emoji} {p.from} → {getRoommateObj(p.to).emoji} {p.to}　£{p.amount.toFixed(2)}
+                                      </div>
+                                      <div className="text-[10px] text-slate-400 mt-0.5">
+                                        {new Date(p.createdAt).toLocaleString()}
+                                        {p.receiverConfirmed ? '　✓ 已確認收款' : '　⏳ 待收款方確認'}
+                                      </div>
+                                    </div>
+                                    {!p.receiverConfirmed && (
+                                      <button
+                                        onClick={() => handleConfirmWeekPayment(p)}
+                                        disabled={currentUser !== p.to}
+                                        className={`px-2.5 py-1 rounded-lg font-bold text-[10px] flex items-center gap-1 shrink-0 ${
+                                          currentUser === p.to ? 'bg-emerald-500 text-white hover:bg-emerald-600' : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                        }`}
+                                      >
+                                        <i className="fa-solid fa-circle-check"></i>
+                                        確認收款
+                                        {currentUser !== p.to && <i className="fa-solid fa-lock text-[8px]"></i>}
+                                      </button>
+                                    )}
+                                  </div>
+                                ))
                               )}
                             </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
-                            <button
-                              onClick={() => handleTogglePaymentStatus(tr, 'payer_pay')}
-                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
-                                status.payerPaid
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
-                              } ${!canIPay ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            >
-                              <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
-                              <span>付款 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '標記已付款'}</span>
-                              {!canIPay && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
-                            </button>
-
-                            <button
-                              onClick={() => handleTogglePaymentStatus(tr, 'receiver_confirm')}
-                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
-                                status.receiverConfirmed
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : status.payerPaid 
-                                    ? 'bg-rose-500 text-white shadow hover:bg-rose-600' 
-                                    : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
-                              } ${!canIConfirm ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            >
-                              <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
-                              <span>收款 ({toObj.name})：{status.receiverConfirmed ? '已確認消帳' : '確認收到並消帳'}</span>
-                              {!canIConfirm && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
-                            </button>
-                          </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1629,81 +1820,112 @@
               <div className="bg-white p-6 rounded-3xl shadow-sm border-2 border-rose-100">
                 <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2">
                   <span className="text-xl">💰</span>
-                  本月轉帳清單與雙方消帳確認
+                  本月轉帳清單與消帳記錄
                 </h3>
-                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。</p>
+                <p className="text-xs text-slate-400 mb-4">🔒 付款方僅能標記自己付款，收款方僅能確認自己收款消帳。可以分次付款，點卡片展開查看每筆紀錄。</p>
 
-                {monthlyCalculation.transfers.length === 0 ? (
+                {monthSettlementPairs.length === 0 ? (
                   <div className="text-center py-8 text-emerald-600 font-bold text-sm">
                     🎉 本月帳目完美平衡，不需要互相轉帳！
                   </div>
                 ) : (
-                  <div className="space-y-4">
-                    {monthlyCalculation.transfers.map(tr => {
-                      const monthSettles = billSettlements[currentMonthObj.key] || {};
-                      const status = monthSettles[tr.id] || { payerPaid: false, receiverConfirmed: false };
-                      const isCleared = status.payerPaid && status.receiverConfirmed;
-
-                      const fromObj = getRoommateObj(tr.from);
-                      const toObj = getRoommateObj(tr.to);
-
-                      const canIPay = currentUser === tr.from;
-                      const canIConfirm = currentUser === tr.to;
+                  <div className="space-y-3">
+                    {monthSettlementPairs.map(pair => {
+                      const fromObj = getRoommateObj(pair.from);
+                      const toObj = getRoommateObj(pair.to);
+                      const isExpanded = !!expandedMonthPairs[pair.pairKey];
+                      const isCleared = pair.remaining <= 0.009;
+                      const undeclared = Math.round((pair.remaining - pair.pendingTotal) * 100) / 100;
+                      const canIPay = currentUser === pair.from;
 
                       return (
-                        <div key={tr.id} className={`p-4 rounded-2xl border-2 transition ${
+                        <div key={pair.pairKey} className={`rounded-2xl border-2 transition ${
                           isCleared ? 'bg-emerald-50/50 border-emerald-300' : 'bg-slate-50 border-slate-200'
                         }`}>
-                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm">
+                          <button
+                            type="button"
+                            onClick={() => setExpandedMonthPairs({ ...expandedMonthPairs, [pair.pairKey]: !isExpanded })}
+                            className="w-full flex items-center justify-between gap-2 p-4 text-left"
+                          >
+                            <div className="flex items-center gap-2 font-bold text-slate-800 text-sm flex-wrap">
                               <span>{fromObj.emoji} {fromObj.name}</span>
                               <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
                               <span>{toObj.emoji} {toObj.name}</span>
-                              <span className="text-rose-600 font-extrabold text-base ml-1">£{tr.amount.toFixed(2)}</span>
                             </div>
-
-                            <div>
+                            <div className="flex items-center gap-2 shrink-0">
                               {isCleared ? (
-                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">
-                                  ✓ 已消帳完成
-                                </span>
+                                <span className="bg-emerald-500 text-white text-xs font-bold px-3 py-1 rounded-full">✓ 已結清</span>
                               ) : (
-                                <span className="bg-amber-100 text-amber-800 text-xs font-bold px-2.5 py-1 rounded-full">
-                                  ⏳ 待結算
-                                </span>
+                                <div className="text-right">
+                                  <div className="text-rose-600 font-extrabold text-sm">剩餘 £{pair.remaining.toFixed(2)}</div>
+                                  {pair.pendingTotal > 0.009 && (
+                                    <div className="text-[10px] text-amber-600">其中 £{pair.pendingTotal.toFixed(2)} 待確認</div>
+                                  )}
+                                </div>
+                              )}
+                              <i className={`fa-solid fa-chevron-${isExpanded ? 'up' : 'down'} text-slate-400 text-xs`}></i>
+                            </div>
+                          </button>
+
+                          {!isCleared && undeclared > 0.009 && (
+                            <div className="px-4 pb-3 flex items-center gap-2">
+                              <input
+                                type="number"
+                                step="0.01"
+                                placeholder={undeclared.toFixed(2)}
+                                value={monthPayAmountInputs[pair.pairKey] ?? ''}
+                                onChange={(e) => setMonthPayAmountInputs({ ...monthPayAmountInputs, [pair.pairKey]: e.target.value })}
+                                disabled={!canIPay}
+                                className="flex-1 bg-white border-2 border-slate-200 rounded-xl px-3 py-1.5 text-xs disabled:bg-slate-100 disabled:cursor-not-allowed"
+                              />
+                              <button
+                                onClick={() => handleMarkMonthPayment(pair)}
+                                disabled={!canIPay}
+                                className={`px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-1 transition shrink-0 ${
+                                  canIPay ? 'bg-rose-500 text-white hover:bg-rose-600 shadow' : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                                }`}
+                              >
+                                <i className="fa-solid fa-hand-holding-dollar"></i>
+                                {fromObj.name} 標記付款
+                                {!canIPay && <i className="fa-solid fa-lock text-[9px]"></i>}
+                              </button>
+                            </div>
+                          )}
+
+                          {isExpanded && (
+                            <div className="px-4 pb-4 pt-2 border-t border-slate-200/60 space-y-2">
+                              {pair.payments.length === 0 ? (
+                                <p className="text-xs text-slate-400">尚無付款紀錄</p>
+                              ) : (
+                                pair.payments.map(p => (
+                                  <div key={p.id} className="flex items-center justify-between gap-2 bg-white rounded-xl border border-slate-200 px-3 py-2 text-xs">
+                                    <div>
+                                      <div className="font-bold text-slate-700">
+                                        {getRoommateObj(p.from).emoji} {p.from} → {getRoommateObj(p.to).emoji} {p.to}　£{p.amount.toFixed(2)}
+                                      </div>
+                                      <div className="text-[10px] text-slate-400 mt-0.5">
+                                        {new Date(p.createdAt).toLocaleString()}
+                                        {p.receiverConfirmed ? '　✓ 已確認收款' : '　⏳ 待收款方確認'}
+                                      </div>
+                                    </div>
+                                    {!p.receiverConfirmed && (
+                                      <button
+                                        onClick={() => handleConfirmMonthPayment(p)}
+                                        disabled={currentUser !== p.to}
+                                        className={`px-2.5 py-1 rounded-lg font-bold text-[10px] flex items-center gap-1 shrink-0 ${
+                                          currentUser === p.to ? 'bg-emerald-500 text-white hover:bg-emerald-600' : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                        }`}
+                                      >
+                                        <i className="fa-solid fa-circle-check"></i>
+                                        確認收款
+                                        {currentUser !== p.to && <i className="fa-solid fa-lock text-[8px]"></i>}
+                                      </button>
+                                    )}
+                                  </div>
+                                ))
                               )}
                             </div>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 text-xs">
-                            <button
-                              onClick={() => handleToggleBillPaymentStatus(tr, 'payer_pay')}
-                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
-                                status.payerPaid
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
-                              } ${!canIPay ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            >
-                              <i className={`fa-solid ${status.payerPaid ? 'fa-check' : 'fa-hand-holding-dollar'}`}></i>
-                              <span>付款 ({fromObj.name})：{status.payerPaid ? '已標記付款' : '標記已付款'}</span>
-                              {!canIPay && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
-                            </button>
-
-                            <button
-                              onClick={() => handleToggleBillPaymentStatus(tr, 'receiver_confirm')}
-                              className={`p-2 rounded-xl font-bold flex items-center justify-center gap-1 transition ${
-                                status.receiverConfirmed
-                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                                  : status.payerPaid
-                                    ? 'bg-rose-500 text-white shadow hover:bg-rose-600'
-                                    : 'bg-white text-slate-400 border border-slate-200 cursor-not-allowed'
-                              } ${!canIConfirm ? 'opacity-50 cursor-not-allowed' : ''}`}
-                            >
-                              <i className={`fa-solid ${status.receiverConfirmed ? 'fa-circle-check' : 'fa-receipt'}`}></i>
-                              <span>收款 ({toObj.name})：{status.receiverConfirmed ? '已確認消帳' : '確認收到並消帳'}</span>
-                              {!canIConfirm && <i className="fa-solid fa-lock text-[9px] text-slate-400"></i>}
-                            </button>
-                          </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1880,9 +2102,9 @@
 
                 <div className="space-y-2">
                   {unsettledItems.map((item, idx) => {
-                    const fromObj = getRoommateObj(item.tr.from);
-                    const toObj = getRoommateObj(item.tr.to);
-                    const iOwe = item.tr.from === currentUser;
+                    const fromObj = getRoommateObj(item.pair.from);
+                    const toObj = getRoommateObj(item.pair.to);
+                    const iOwe = item.role === 'payer';
 
                     return (
                       <button
@@ -1912,10 +2134,10 @@
                           <span>{fromObj.emoji} {fromObj.name}</span>
                           <i className="fa-solid fa-arrow-right text-rose-400 text-xs"></i>
                           <span>{toObj.emoji} {toObj.name}</span>
-                          <span className="text-rose-600 font-extrabold text-base ml-1">£{item.tr.amount.toFixed(2)}</span>
+                          <span className="text-rose-600 font-extrabold text-base ml-1">£{item.amount.toFixed(2)}</span>
                         </div>
                         <div className="text-[10px] text-slate-400 mt-1">
-                          {item.status.payerPaid ? '付款方已標記付款，待收款方確認' : '尚未標記付款'}
+                          {iOwe ? '尚未申報付款' : '付款方已申報付款，待你確認收款'}
                         </div>
                       </button>
                     );
@@ -1927,6 +2149,30 @@
                   className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-2.5 rounded-2xl transition text-xs"
                 >
                   知道了，稍後處理
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 每月 1 號房租提醒 */}
+          {showRentReminderModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-2 border-indigo-200 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <span className="text-xl">📅</span>
+                    今天是 1 號
+                  </h3>
+                  <button onClick={() => setShowRentReminderModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+                <p className="text-sm text-slate-600">別忘了處理本月房租！</p>
+                <button
+                  onClick={() => setShowRentReminderModal(false)}
+                  className="w-full bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-2.5 rounded-2xl shadow-md transition text-xs"
+                >
+                  知道了
                 </button>
               </div>
             </div>
