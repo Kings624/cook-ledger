@@ -75,7 +75,26 @@
       { id: 'Kingsley', name: 'Kingsley', emoji: '👨🏻‍🍳', pin: null }
     ];
 
+    const CHANGELOG = [
+      {
+        date: '2026-09-25',
+        title: '修復資料同步互相蓋掉的 bug',
+        items: [
+          '找到「明明雙方都已確認消帳，過陣子又跳回未結算」的根本原因：舊版每次存檔都是把整份資料整包蓋過去，如果兩人前後腳存檔，後存的人會不小心把前面剛存好的消帳狀態蓋掉、甚至蓋掉別人新增的採購/帳單。',
+          '改成只把「真的有改動」的那個欄位送給資料庫合併，其他人剛存的資料不會再被覆蓋掉。',
+          '未結算提醒改成「每週最多跳一次」，而且是週日晚上 11:50 之後才會跳，不會每次登入都跳出來。',
+          '9/20（含）之前的週視為已結清，不會再跳提醒。'
+        ]
+      }
+    ];
+
     const LEDGER_START_DATE = new Date(2026, 8, 7); // 帳本從這週開始記錄 (2026-09-07)
+    const UNSETTLED_HISTORY_CUTOFF = new Date(2026, 8, 20); // 這天(含)以前的週已經結清，不再檢查/提醒
+
+    // 每週結算時間點：週日晚上 11:50
+    function getWeekSettlementDeadline(week) {
+      return new Date(week.endDate.getFullYear(), week.endDate.getMonth(), week.endDate.getDate(), 23, 50, 0);
+    }
     const MAX_WEEKS_HISTORY = 13; // 最多保留約 3 個月的週紀錄
 
     function getRecentWeeks(baseDate = new Date()) {
@@ -288,7 +307,6 @@
 
       const [showUnsettledModal, setShowUnsettledModal] = useState(false);
       const [unsettledItems, setUnsettledItems] = useState([]);
-      const unsettledCheckedForRef = React.useRef(null);
 
       const [expandedWeekPairs, setExpandedWeekPairs] = useState({});
       const [weekPayAmountInputs, setWeekPayAmountInputs] = useState({});
@@ -306,6 +324,8 @@
       const [showLoginModal, setShowLoginModal] = useState(false);
       const [showBackupModal, setShowBackupModal] = useState(false);
       const [backupJsonInput, setBackupJsonInput] = useState('');
+      const [showChangelogModal, setShowChangelogModal] = useState(false);
+      const [showCalculatorModal, setShowCalculatorModal] = useState(false);
 
       const [bindTarget, setBindTarget] = useState('Janice');
       const [pinInput, setPinInput] = useState('');
@@ -397,8 +417,18 @@
       }, []);
 
       // 推送寫入 Supabase
+      // 只把「真的有改動」的欄位送出去合併，不會把其他人剛存好、但這台裝置記憶體裡還沒同步到的欄位蓋掉
       const saveData = async (newExp, newDin, newSet, newRm, newBills, newBillSet) => {
-        const payload = {
+        const patch = {};
+        if (newExp !== undefined) patch.expenses = newExp;
+        if (newDin !== undefined) patch.dinnerAbsent = newDin;
+        if (newSet !== undefined) patch.settlements = newSet;
+        if (newRm !== undefined) patch.roommates = newRm;
+        if (newBills !== undefined) patch.bills = newBills;
+        if (newBillSet !== undefined) patch.billSettlements = newBillSet;
+
+        // 本機快取還是存完整快照，方便離線/開啟瞬間先顯示上次看到的資料
+        const localSnapshot = {
           expenses: newExp !== undefined ? newExp : expenses,
           dinnerAbsent: newDin !== undefined ? newDin : dinnerAbsent,
           settlements: newSet !== undefined ? newSet : settlements,
@@ -406,16 +436,13 @@
           bills: newBills !== undefined ? newBills : bills,
           billSettlements: newBillSet !== undefined ? newBillSet : billSettlements
         };
+        localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(localSnapshot));
 
-        localStorage.setItem(PERMANENT_STORAGE_KEY, JSON.stringify(payload));
-
-        if (!supabase) return;
+        if (!supabase || Object.keys(patch).length === 0) return;
         setSyncStatus('syncing');
 
         try {
-          const { error } = await supabase
-            .from('cook_ledger')
-            .upsert({ id: DB_ROW_ID, data: payload, updated_at: new Date().toISOString() });
+          const { error } = await supabase.rpc('merge_cook_ledger_data', { row_id: DB_ROW_ID, patch });
 
           if (!error) {
             setSyncStatus('online');
@@ -510,7 +537,86 @@
       const handleLogout = () => {
         setCurrentUser(null);
         localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
-        unsettledCheckedForRef.current = null;
+      };
+
+      // ===== 小計算機 =====
+      const [calcDisplay, setCalcDisplay] = useState('0');
+      const [calcPrev, setCalcPrev] = useState(null);
+      const [calcOperator, setCalcOperator] = useState(null);
+      const [calcWaitingForOperand, setCalcWaitingForOperand] = useState(false);
+
+      const calcCompute = (a, b, op) => {
+        switch (op) {
+          case '+': return a + b;
+          case '-': return a - b;
+          case '×': return a * b;
+          case '÷': return b === 0 ? 0 : a / b;
+          default: return b;
+        }
+      };
+
+      const calcInputDigit = (digit) => {
+        if (calcWaitingForOperand) {
+          setCalcDisplay(digit);
+          setCalcWaitingForOperand(false);
+        } else {
+          setCalcDisplay(calcDisplay === '0' ? digit : calcDisplay + digit);
+        }
+      };
+
+      const calcInputDecimal = () => {
+        if (calcWaitingForOperand) {
+          setCalcDisplay('0.');
+          setCalcWaitingForOperand(false);
+          return;
+        }
+        if (!calcDisplay.includes('.')) setCalcDisplay(calcDisplay + '.');
+      };
+
+      const calcClear = () => {
+        setCalcDisplay('0');
+        setCalcPrev(null);
+        setCalcOperator(null);
+        setCalcWaitingForOperand(false);
+      };
+
+      const calcBackspace = () => {
+        if (calcWaitingForOperand) return;
+        setCalcDisplay(calcDisplay.length > 1 ? calcDisplay.slice(0, -1) : '0');
+      };
+
+      const calcToggleSign = () => {
+        setCalcDisplay(calcDisplay.startsWith('-') ? calcDisplay.slice(1) : (calcDisplay === '0' ? '0' : '-' + calcDisplay));
+      };
+
+      const calcPercent = () => {
+        setCalcDisplay(String(parseFloat(calcDisplay) / 100));
+      };
+
+      const calcInputOperator = (nextOperator) => {
+        const inputValue = parseFloat(calcDisplay);
+
+        if (calcPrev === null) {
+          setCalcPrev(inputValue);
+        } else if (calcOperator) {
+          const result = calcCompute(calcPrev, inputValue, calcOperator);
+          setCalcDisplay(String(Math.round(result * 1e8) / 1e8));
+          setCalcPrev(result);
+        }
+
+        setCalcWaitingForOperand(true);
+        setCalcOperator(nextOperator);
+      };
+
+      const calcEquals = () => {
+        const inputValue = parseFloat(calcDisplay);
+        if (calcOperator && calcPrev !== null) {
+          const result = calcCompute(calcPrev, inputValue, calcOperator);
+          setCalcDisplay(String(Math.round(result * 1e8) / 1e8));
+          setCalcPrev(null);
+          setCalcOperator(null);
+          setCalcWaitingForOperand(true);
+        }
       };
 
       const handleExportBackup = () => {
@@ -947,12 +1053,17 @@
 
       useEffect(() => {
         if (!currentUser || syncStatus !== 'online') return;
-        if (unsettledCheckedForRef.current === currentUser) return;
-        unsettledCheckedForRef.current = currentUser;
 
         const items = [];
+        const now = new Date();
 
         weeksList.forEach(week => {
+          if (week.endDate <= UNSETTLED_HISTORY_CUTOFF) return; // 歷史週已結清，不再檢查
+          if (now < getWeekSettlementDeadline(week)) return; // 還沒到週日晚上 11:50，先不提醒
+
+          const debounceKey = `ROOM204_WEEK_NOTIFIED_${currentUser}_${week.key}`;
+          if (localStorage.getItem(debounceKey)) return; // 這週已經提醒過，不用每天推
+
           const start = new Date(week.startDate);
           start.setHours(0, 0, 0, 0);
           const end = new Date(week.endDate);
@@ -963,6 +1074,8 @@
             const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
             return d >= start && d <= end;
           });
+
+          localStorage.setItem(debounceKey, '1');
           if (weekExpenses.length === 0) return;
 
           const weekPays = (settlements[week.key] && settlements[week.key].payments) || [];
@@ -980,7 +1093,12 @@
         });
 
         monthsList.forEach(month => {
+          const debounceKey = `ROOM204_MONTH_NOTIFIED_${currentUser}_${month.key}`;
+          if (localStorage.getItem(debounceKey)) return; // 這個月已經提醒過，不用每天推
+
           const monthBills = bills.filter(b => b.month === month.key);
+
+          localStorage.setItem(debounceKey, '1');
           if (monthBills.length === 0) return;
 
           const monthPays = (billSettlements[month.key] && billSettlements[month.key].payments) || [];
@@ -1116,6 +1234,22 @@
                 >
                   <i className="fa-solid fa-database"></i>
                   <span>備份</span>
+                </button>
+
+                <button
+                  onClick={() => setShowCalculatorModal(true)}
+                  className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-1.5 rounded-full text-xs transition flex items-center gap-1.5"
+                  title="計算機"
+                >
+                  <i className="fa-solid fa-calculator"></i>
+                </button>
+
+                <button
+                  onClick={() => setShowChangelogModal(true)}
+                  className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-1.5 rounded-full text-xs transition flex items-center gap-1.5"
+                  title="更新日誌"
+                >
+                  <i className="fa-solid fa-clipboard-list"></i>
                 </button>
 
                 {currentUser ? (
@@ -2319,6 +2453,96 @@
                 >
                   知道了
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 計算機 (可拖曳右下角縮放) */}
+          {showCalculatorModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div
+                className="bg-white rounded-3xl p-4 shadow-2xl border-2 border-rose-100 flex flex-col"
+                style={{ width: '300px', height: '440px', minWidth: '260px', minHeight: '380px', maxWidth: '90vw', maxHeight: '90vh', resize: 'both', overflow: 'auto' }}
+              >
+                <div className="flex justify-between items-center mb-2 shrink-0">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2 text-sm">
+                    <i className="fa-solid fa-calculator text-rose-500"></i>
+                    計算機
+                  </h3>
+                  <button onClick={() => setShowCalculatorModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="bg-slate-800 text-white rounded-2xl px-4 py-4 mb-3 text-right text-3xl font-bold overflow-x-auto shrink-0">
+                  {calcDisplay}
+                </div>
+
+                <div className="grid grid-cols-4 gap-2 flex-1">
+                  <button onClick={calcClear} className="rounded-2xl font-bold text-base bg-slate-200 text-slate-700 hover:bg-slate-300 transition">C</button>
+                  <button onClick={calcToggleSign} className="rounded-2xl font-bold text-base bg-slate-200 text-slate-700 hover:bg-slate-300 transition">+/-</button>
+                  <button onClick={calcPercent} className="rounded-2xl font-bold text-base bg-slate-200 text-slate-700 hover:bg-slate-300 transition">%</button>
+                  <button onClick={() => calcInputOperator('÷')} className="rounded-2xl font-bold text-lg bg-rose-400 text-white hover:bg-rose-500 transition">÷</button>
+
+                  <button onClick={() => calcInputDigit('7')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">7</button>
+                  <button onClick={() => calcInputDigit('8')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">8</button>
+                  <button onClick={() => calcInputDigit('9')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">9</button>
+                  <button onClick={() => calcInputOperator('×')} className="rounded-2xl font-bold text-lg bg-rose-400 text-white hover:bg-rose-500 transition">×</button>
+
+                  <button onClick={() => calcInputDigit('4')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">4</button>
+                  <button onClick={() => calcInputDigit('5')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">5</button>
+                  <button onClick={() => calcInputDigit('6')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">6</button>
+                  <button onClick={() => calcInputOperator('-')} className="rounded-2xl font-bold text-lg bg-rose-400 text-white hover:bg-rose-500 transition">-</button>
+
+                  <button onClick={() => calcInputDigit('1')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">1</button>
+                  <button onClick={() => calcInputDigit('2')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">2</button>
+                  <button onClick={() => calcInputDigit('3')} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">3</button>
+                  <button onClick={() => calcInputOperator('+')} className="rounded-2xl font-bold text-lg bg-rose-400 text-white hover:bg-rose-500 transition">+</button>
+
+                  <button onClick={() => calcInputDigit('0')} className="col-span-2 rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">0</button>
+                  <button onClick={calcInputDecimal} className="rounded-2xl font-bold text-lg bg-slate-50 hover:bg-slate-100 transition">.</button>
+                  <button onClick={calcEquals} className="rounded-2xl font-bold text-lg bg-rose-500 text-white hover:bg-rose-600 transition">=</button>
+                </div>
+
+                <button onClick={calcBackspace} className="mt-2 text-xs text-slate-400 hover:text-slate-600 font-bold flex items-center justify-center gap-1 shrink-0">
+                  <i className="fa-solid fa-delete-left"></i>
+                  倒退一位
+                </button>
+
+                <p className="text-[10px] text-slate-300 text-center mt-1 shrink-0">拖曳視窗右下角可以放大/縮小</p>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: 更新日誌 */}
+          {showChangelogModal && (
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border-2 border-rose-100 space-y-4 max-h-[85vh] overflow-y-auto">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                    <i className="fa-solid fa-clipboard-list text-rose-500"></i>
+                    更新日誌
+                  </h3>
+                  <button onClick={() => setShowChangelogModal(false)} className="text-slate-400 hover:text-slate-600">
+                    <i className="fa-solid fa-xmark text-lg"></i>
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  {CHANGELOG.map((entry, idx) => (
+                    <div key={idx} className="bg-rose-50/40 border-2 border-rose-100 rounded-2xl p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-[10px] font-bold text-rose-500 bg-rose-100 px-2 py-0.5 rounded-full">{entry.date}</span>
+                        <span className="font-bold text-slate-800 text-sm">{entry.title}</span>
+                      </div>
+                      <ul className="space-y-1.5 text-xs text-slate-600 list-disc list-inside">
+                        {entry.items.map((line, i) => (
+                          <li key={i}>{line}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
