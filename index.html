@@ -221,18 +221,27 @@
       return getPairKeys(roommates).map(pairKey => {
         const [a, b] = pairKey.split('<');
         const signed = getPairSignedBalance(pairKey, items, payments);
+        const currentFrom = signed >= 0 ? a : b;
+        const currentTo = signed >= 0 ? b : a;
+
         const pairPayments = payments
           .filter(p => p.pairKey === pairKey)
           .slice()
           .sort((x, y) => new Date(y.createdAt) - new Date(x.createdAt));
+
+        // 只算「付款方向跟目前欠款方向一致」的待確認金額──這樣確認後一定會讓剩餘變少。
+        // 如果欠款方向中途反轉過，舊方向的待確認付款仍然會顯示在紀錄裡（還是可以確認），
+        // 只是不會被當成「馬上就會扣掉」的待確認金額，避免金額對不上。
         const pendingTotal = Math.round(
-          pairPayments.filter(p => p.payerPaid && !p.receiverConfirmed).reduce((sum, p) => sum + p.amount, 0) * 100
+          pairPayments
+            .filter(p => p.payerPaid && !p.receiverConfirmed && p.from === currentFrom && p.to === currentTo)
+            .reduce((sum, p) => sum + p.amount, 0) * 100
         ) / 100;
 
         return {
           pairKey,
-          from: signed >= 0 ? a : b,
-          to: signed >= 0 ? b : a,
+          from: currentFrom,
+          to: currentTo,
           remaining: Math.abs(signed),
           pendingTotal,
           payments: pairPayments
